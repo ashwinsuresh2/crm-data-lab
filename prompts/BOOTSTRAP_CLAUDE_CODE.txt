@@ -1,0 +1,12 @@
+Act as the lead architect and foreman for this repository.
+
+First, read CLAUDE.md, docs/PROJECT_CHARTER.md, docs/FIRST_VERTICAL_SLICE.md, docs/WORK_GRAPH.md, docs/DECISION_LOG.md, and tasks/SPRINT-0001.md. Inspect the repository state without changing product code.
+
+Then:
+1. Report whether the agent definitions and settings are loaded.
+2. Run a setup diagnostic and identify missing local tools.
+3. Propose the exact contract-first graph for Sprint 0001, including node inputs, outputs, path ownership, barriers, verifiers, and stop conditions.
+4. Do not start implementation yet.
+5. Ask for human approval of the graph and only the truly blocking choices.
+
+Use subagents for independent repository inspection, but keep this main thread focused on decisions and integration.

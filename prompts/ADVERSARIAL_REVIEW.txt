@@ -1,0 +1,9 @@
+Review the proposed integration adversarially using parallel read-only agents with distinct lenses:
+
+- Behavioral correctness and acceptance criteria
+- Transactions, idempotency, replay, and worker restart
+- Authentication, authorization, and tenant isolation
+- Architecture boundaries, replacement readiness, and idle cost
+- Test quality and missing failure cases
+
+Each finding must include evidence, severity, reproduction, and smallest safe fix. A finding survives only if at least two lenses agree or one lens provides a deterministic reproduction. Do not edit code. Return confirmed findings, rejected suspicions, and residual risk.

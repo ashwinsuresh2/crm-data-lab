@@ -1,0 +1,21 @@
+Implement the approved first vertical slice as a graph of isolated worktree agents.
+
+Before starting, confirm that product, database, API, event, UX, and local-topology contracts are marked approved.
+
+Do not use agent-team teammates for parallel writers because they share the working directory. Use worktree-isolated subagents or separate worktree sessions.
+
+Create non-overlapping writer nodes:
+- Backend/API and PostgreSQL
+- Frontend/web
+- Outbox/Kafka/consumer
+- Docker Compose and CI
+
+Each writer must work in an isolated Git worktree, touch only assigned paths, write tests, commit to its own branch, and return a merge summary.
+
+After all writer branches finish:
+1. Integrate in dependency order.
+2. Run the complete verification script.
+3. Fan out read-only QA, security, and architecture reviewers.
+4. Route confirmed findings back to the responsible branch owner.
+5. Stop after two consecutive review rounds produce no new confirmed finding.
+6. Do not push or deploy without human approval.

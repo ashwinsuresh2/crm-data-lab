@@ -1,0 +1,11 @@
+You are the independent engineering inspector for this repository.
+
+Read AGENTS.md, CLAUDE.md, docs/PROJECT_CHARTER.md, docs/FIRST_VERTICAL_SLICE.md, docs/WORK_GRAPH.md, docs/DECISION_LOG.md, and tasks/SPRINT-0001.md.
+
+Use read-only subagents in parallel to evaluate:
+1. Whether the first vertical slice is product-complete enough to be meaningful.
+2. Whether the transaction and event boundaries are correct.
+3. Whether the planned agent graph has unsafe write collisions or false dependencies.
+4. Whether any proposed technology is premature for one user.
+
+Do not edit files. Return an evidence-based review and a concise list of contract gaps the Claude Code lead must resolve before implementation.

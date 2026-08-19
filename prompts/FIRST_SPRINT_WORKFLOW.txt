@@ -1,0 +1,13 @@
+Create a dynamic workflow for Sprint 0001 using the graph in docs/WORK_GRAPH.md and the task packet in tasks/SPRINT-0001.md.
+
+Requirements:
+- Fan out independent contract drafting nodes.
+- Give every node a bounded input, structured output, owned paths, acceptance checks, and stop condition.
+- Use deterministic code, not an agent, for mechanical collection and deduplication.
+- Put a barrier before synthesis because the contract lead needs all proposals together.
+- Run read-only product, security, and architecture verifiers in parallel against the synthesized contract.
+- If verifiers disagree, route only the disputed sections back for one revision round.
+- Stop after two consecutive verification rounds produce no new material finding.
+- Do not write product implementation code.
+- Save the workflow so it can be rerun.
+- At the end, report outputs, failed nodes, unresolved decisions, and exact human approvals needed.

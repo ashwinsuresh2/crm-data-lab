@@ -1,0 +1,13 @@
+Start a read-only planning fleet for Sprint 0001. Do not edit code.
+
+If experimental agent teams are enabled, create a coordinated read-only team. Otherwise use parallel read-only subagents and collect their reports in the lead session.
+
+Create four bounded responsibilities:
+- Product/CRM behavior
+- Domain, transaction, and tenant model
+- Event-streaming and idempotency contract
+- UX and local-development topology
+
+Each worker must produce a structured proposal with assumptions, unresolved questions, and acceptance tests. Where the tool supports peer messaging, workers may challenge one another. The lead must synthesize conflicts into one contract-freeze proposal for human approval.
+
+Do not allow the fleet to begin implementation. Stop after the contract proposal and verification plan are complete.
