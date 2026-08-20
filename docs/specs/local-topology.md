@@ -254,7 +254,10 @@ Given that precondition, Sprint 0002 must ship an explicit replay procedure:
 - `apps/worker`: logs a ready line after joining its Kafka consumer group; no
   listening port.
 - Authn/authz **denial logs** are written to the API process stdout/log stream
-  (structured, with actor, tenant, action, record, and time) — this is where
+  as structured events carrying the exact canonical denial-event fields
+  defined by **P-AUTH-8** in the product behavior contract, including route.
+  P-AUTH-8 is the sole source of truth for that field list; this document
+  deliberately does not define a second list that could drift. This is where
   Node P's denial-logging requirement is satisfied locally.
 
 ### Loopback enforcement (startup assertion)
