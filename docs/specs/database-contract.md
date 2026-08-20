@@ -351,6 +351,8 @@ CREATE TABLE outbox_event (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
                        -- INVARIANT (Node E seam): the envelope's event_id MUST equal this id
     seq                bigint GENERATED ALWAYS AS IDENTITY,
+                       -- INTERNAL publisher-coordination metadata only; never exposed
+                       -- through tenant-facing APIs (see §7.1 confidentiality rule)
     tenant_id          uuid NOT NULL REFERENCES tenant(id),
     event_type         text NOT NULL CHECK (length(event_type) BETWEEN 1 AND 100),
     aggregate_type     text NOT NULL CHECK (length(aggregate_type) BETWEEN 1 AND 100),
@@ -558,10 +560,20 @@ success update below keeps observability consistent).
       SET status = 'processed', processed_at = now()
     WHERE consumer_name = $consumer AND event_id = $event_id
       AND status = 'processing';
-   -- 0 rows updated → a concurrent attempt already processed it: ROLLBACK
-   --                  (side effects must not commit twice), then ack.
+   -- 0 rows updated → ROLLBACK (side effects must not commit), then apply the
+   --                  zero-row re-read rule below before deciding whether to ack.
    COMMIT;
    ```
+
+   **Zero-row finalization rule:** zero rows updated is **never** treated as proof of
+   successful prior processing. When the success-finalization statement updates zero
+   rows, roll back, then **re-read the receipt by `tenant_id`, `consumer_name`, and
+   `event_id` in a fresh transaction** and decide from what it actually says:
+   - re-read status `processed` → acknowledge the event (a concurrent attempt
+     completed it);
+   - re-read status `failed`, `processing`, or receipt absent → do **not**
+     acknowledge the event as successfully processed; a `failed` receipt remains
+     eligible for the defined retry path (step 1 on redelivery).
 
 3. **Failure (transaction C, post-rollback, BEST-EFFORT).** If transaction B fails,
    roll it back, then in a separate short transaction record the failure:
@@ -608,6 +620,14 @@ Honest gloss for **pending** (ratified finding): *not yet confirmed published; t
 event may already be in the event stream* — the crash window after broker ack but
 before the acknowledge transaction (§5) means "pending" cannot promise the event has
 not been seen. At-least-once consumers make this safe.
+
+**Confidentiality of `seq`:** `outbox_event.seq` is internal publisher-coordination
+metadata only. It must not be exposed through tenant-facing APIs; it must not appear
+in customer-visible event-processing responses; it must not be presented as a global
+business-ordering guarantee; and it must never allow one tenant to infer another
+tenant's event volume or ordering (a global monotone counter leaks exactly that).
+Tenant-facing inspection uses `event_id` and the tenant-scoped aggregate linkage
+(§7.2), not `seq`.
 
 ### 7.2 Linkage: Interaction → Outbox event → Consumer receipt
 
