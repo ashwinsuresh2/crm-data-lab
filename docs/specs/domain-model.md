@@ -73,7 +73,7 @@ The unit of data isolation and, later, of external customer onboarding.
 | id | uuid | Primary key. |
 | name | text | Display name; non-empty. |
 | operating_timezone | text | Required IANA timezone identifier (e.g. `America/New_York`). Defines how date-typed fields such as `Task.due_on` are interpreted (e.g. what "due today" and end-of-day mean). Validated at the API layer against the IANA set. |
-| status | text | `active` \| `suspended`. Slice only uses `active`. |
+| status | text | `active` \| `suspended`. Normal product fixtures use `active` tenants; Sprint-0001 authorization tests also include a suspended-tenant fixture, and a suspended tenant is rejected according to P-AUTH-6. |
 | created_at | timestamptz | |
 
 Invariants:
