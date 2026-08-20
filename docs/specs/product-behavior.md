@@ -12,13 +12,25 @@ This document defines the observable behavior of the first vertical slice. It de
 
 Every noun used in this contract is defined here. No behavior in this document requires objects beyond: Tenant, User, Membership, Company, Contact, Interaction, Task, Audit event, Outbox event.
 
-- **Tenant** — the isolation boundary that owns all business records. Every company, contact, interaction, task, audit event, and outbox event belongs to exactly one tenant.
-- **User** — an identity that can act in the system. A user acts within exactly one tenant per request, resolved via membership.
-- **Membership** — the association between a user and a tenant that grants the user the right to act inside that tenant. A user with no membership in a tenant has no access to any of that tenant's records.
+- **Tenant** — the isolation boundary that owns all business records. Every company, contact, interaction, task, audit event, and outbox event belongs to exactly one tenant. Every tenant has a required **operating timezone**.
+- **Operating timezone (`Tenant.operating_timezone`)** — a required tenant property holding an IANA timezone identifier (for example `America/Los_Angeles`). It defines what "today" means for that tenant: follow-up-date validation ("today or later", Section 5.2) is evaluated against the current date in the tenant's operating timezone, not the server's or the browser's timezone.
+- **User** — an identity that can act in the system. A user may hold memberships in multiple tenants, but every request carries exactly one **active tenant** context, and the user acts only within that tenant for that request.
+- **Membership** — the association between a user and a tenant that grants the user the right to act inside that tenant. A user may have zero, one, or many memberships. The membership for the request's active tenant is independently verified on every request; a user with no membership in the active tenant has no access to any of that tenant's records, regardless of memberships elsewhere.
+- **Active tenant** — the single tenant context attached to a request. With the dev-token stub, each seeded dev token binds one user to one active tenant (Section 2); switching tenants means presenting a different token.
 - **Company** — a business record representing an organization the salesperson sells to. Minimum user-visible attribute: a required non-empty name.
 - **Contact** — a business record representing a person, associated with exactly one company in the same tenant. Minimum user-visible attributes: a required non-empty name and the owning company. A contact also displays a **last-contacted timestamp**: the date-time of the most recent interaction logged against that contact, or an explicit "never contacted" state if none exists.
 - **Interaction** — a record of a communication with a contact. In this slice the only interaction type is a **call**. An interaction has: the contact it belongs to, a required **outcome**, an optional free-text note, a required **follow-up date**, the acting user, and the date-time it was logged.
-- **Outcome** — a required classification of the call chosen from a closed, seeded list presented by the UI (for example: connected, no answer, left voicemail — the exact list is fixed by Node D and rendered verbatim in the form). Free-typed outcome values are not accepted.
+- **Outcome** — a required classification of the call chosen from the closed, seeded list defined below. This vocabulary is a product decision owned by this contract. The stored token is the exact value accepted by the API; the user-visible label is the exact text rendered in the form and on timeline entries. Free-typed outcome values are not accepted, and no other values are valid in this slice.
+
+  | Stored token | User-visible label | Meaning |
+  |---|---|---|
+  | `connected` | Connected | Spoke with the contact. |
+  | `no_answer` | No answer | Call placed; no one answered and no message was left. |
+  | `left_voicemail` | Left voicemail | Call placed; a voicemail was left. |
+  | `meeting_scheduled` | Meeting scheduled | Spoke with the contact and a meeting was agreed. |
+  | `not_interested` | Not interested | Spoke with the contact; they declined further engagement. |
+
+  The form presents exactly these five labels, in this order, as a selection control.
 - **Task** — a follow-up work item created as a consequence of logging an interaction. A task has: the contact it relates to, the interaction that caused it, a due date (the follow-up date), a status of **open** or **done**, and the user it is assigned to (in this slice, the acting user). "Open follow-up task" means a task whose status is open.
 - **Timeline** — the chronological list of interactions for a contact, newest first, shown on the contact screen. A **timeline entry** displays: interaction type (call), outcome, note (if any), acting user, and logged date-time.
 - **Audit event** — an immutable record of a meaningful write, visible in the audit view. Each audit event identifies: **actor** (the user), **tenant**, **action** (what kind of change), **record** (which business record was affected), and **time**.
@@ -35,8 +47,10 @@ Observable behavior, honoring the frozen decision that only credential verificat
 
 - **P-AUTH-1.** Every request to the CRM (UI-originated or direct API) must carry a dev token. The browser session obtains one by the user selecting/entering a seeded dev token; thereafter the app presents it on every request.
 - **P-AUTH-2.** A request with no token, an unknown token, or a malformed token is rejected as **unauthenticated**. The UI shows a "sign in required" state and never partial data. Test: call any read or write without a token → authentication error; no record is created or returned.
-- **P-AUTH-3.** A valid token resolves to exactly one user and one tenant membership. All subsequent reads and writes in that session are scoped to that tenant. The UI displays the acting user's identity (name) so a tester can confirm who they are acting as.
-- **P-AUTH-4.** A token that resolves to a real user who has **no membership** in the requested tenant context is rejected as unauthorized before any record-level logic runs. Test: seed a user without membership; every read and write fails with an authorization error and no side effects.
+- **P-AUTH-3.** A valid token resolves to exactly one user and one **active tenant**. All subsequent reads and writes carrying that token are scoped to that tenant. The UI displays both the acting user's identity (name) and the active tenant so a tester can confirm who they are acting as and where.
+- **P-AUTH-3a.** A user may hold memberships in multiple tenants. With the dev-token stub, each seeded token binds the user to one active tenant; a user with two memberships is seeded with two tokens, one per tenant. Presenting token A shows only tenant A's companies, contacts, tasks, and audit events; presenting token B shows only tenant B's. Test: seed one user with memberships in tenants A and B; verify each token yields exactly its own tenant's data, with no record from the other tenant visible in any list, timeline, or audit view.
+- **P-AUTH-3b.** The membership for the active tenant is independently verified on **every** request, not cached from sign-in. Test: after a successful request, remove the user's membership in the active tenant in seed/fixture state; the next request with the same still-valid token is rejected as unauthorized with no side effects.
+- **P-AUTH-4.** A token whose user has **no membership** in the request's active tenant is rejected as unauthorized before any record-level logic runs. Test: seed a user without membership; every read and write fails with an authorization error and no side effects.
 - **P-AUTH-5.** The dev token mechanism is available only in development builds/environments. This is a deployment property; its observable form is that no production configuration documents or accepts the dev-token header. (Testable at the configuration level, not through the slice UI.)
 
 ---
@@ -64,7 +78,7 @@ Five screens. Each lists what a tester must be able to observe.
 - **Empty state:** a contact with no interactions shows an explicit "no interactions yet" message with the log-interaction action, and last-contacted shows "never contacted".
 
 ### 3.4 Log-interaction form
-- Reachable from a contact. Fields: interaction type (fixed to "call" in this slice), **outcome** (required; a selection from the closed seeded list — no free typing), note (optional free text), **follow-up date** (required; a date on or after today in the tenant's operating timezone).
+- Reachable from a contact. Fields: interaction type (fixed to "call" in this slice), **outcome** (required; a selection from the closed seeded list — no free typing), note (optional free text), **follow-up date** (required; a date on or after today, where "today" is the current date in the tenant's operating timezone as defined in Section 1).
 - The form carries an idempotency key generated when the form instance is opened; retries of the same instance reuse it (invisible to the user except through the duplicate-submission behavior in Section 5.1).
 - On success the user is returned to the contact screen and can immediately see the new timeline entry; a confirmation indicates the interaction was logged and a follow-up task was created.
 - Validation failures (Sections 5.2, 5.3) keep the user on the form with the entered values preserved and a field-level error message; nothing is created.
@@ -104,17 +118,18 @@ Journey invariant: one successful submission produces **exactly one** interactio
 - **Contrast:** the same field values submitted with a **different** idempotency key are a new logical request and create a second interaction and task. (Deliberate: logging two identical calls in a day is legitimate.)
 
 ### 5.2 Invalid follow-up date
-- Missing follow-up date, an unparseable date, or a date before today (tenant timezone) is rejected at validation. The form shows a field-level error naming the follow-up date; the entered values are preserved; **nothing is created** — no interaction, task, timeline entry, last-contacted change, audit business event, or outbox event.
-- "Today" is a valid follow-up date.
-- **Test:** submit with yesterday's date via UI and via direct API; verify the validation error and verify by re-reading the contact, home, and audit view that no state changed.
+- Missing follow-up date, an unparseable date, or a date before today is rejected at validation. "Today" is evaluated as the current date in the tenant's required **operating timezone** (`Tenant.operating_timezone`, an IANA identifier — Section 1), not the server's or browser's timezone. The form shows a field-level error naming the follow-up date; the entered values are preserved; **nothing is created** — no interaction, task, timeline entry, last-contacted change, audit business event, or outbox event.
+- "Today" (in the tenant's operating timezone) is a valid follow-up date.
+- **Test:** submit with yesterday's date via UI and via direct API; verify the validation error and verify by re-reading the contact, home, and audit view that no state changed. Timezone boundary test: with a tenant whose operating timezone differs from the server clock's zone such that the local dates differ at test time, verify that a follow-up date equal to the tenant-local "today" is accepted even when it is "yesterday" or "tomorrow" in server time.
 
 ### 5.3 Invalid or missing outcome
 - A missing outcome, or an outcome value not in the seeded closed list, is rejected at validation with a field-level error naming the outcome, values preserved, nothing created (same "nothing created" assertions as 5.2). The UI makes this hard to trigger (selection control), so the direct-API test is the primary check.
 
 ### 5.4 Cross-tenant access attempt
-- **Decision: cross-tenant reads and writes are indistinguishable from not-found.** A user in tenant A who requests, mutates, or logs an interaction against a record ID belonging to tenant B receives exactly the same not-found behavior as for an ID that does not exist at all — same status, same message shape, same timing class.
+- **Decision: cross-tenant reads and writes are indistinguishable from not-found in their public response.** A user in tenant A who requests, mutates, or logs an interaction against a record ID belonging to tenant B receives the **same public HTTP status and the same public error body shape and content** as for an ID that does not exist at all.
+- **Scope of the guarantee:** the contract guarantees identical status and body only. Timing side-channel guarantees (deterministic or equivalent response timing) are explicitly **out of scope** for this slice and are not promised.
 - **Why not-found rather than explicit forbidden:** an explicit "forbidden" confirms that the record exists in some other tenant, leaking record existence and enabling ID enumeration across tenants. Not-found leaks nothing, which matches the charter invariant that every record is tenant-scoped and matches the acceptance criterion that unauthorized users "cannot read or mutate" another tenant's contact.
-- **Test:** seed two tenants each with a user and a contact. As tenant A's user: (a) read tenant B's contact by ID, (b) submit an interaction against it, (c) read a random nonexistent ID. Assert (a) and (b) are byte-for-byte indistinguishable in shape from (c), and that (b) created nothing in either tenant (check both tenants' timelines, tasks, and audit views).
+- **Test:** seed two tenants each with a user and a contact. As tenant A's user: (a) read tenant B's contact by ID, (b) submit an interaction against it, (c) read a random nonexistent ID. Assert (a) and (b) return the same HTTP status and the same error body as (c) (identical after substituting the requested ID, if the body echoes it), and that (b) created nothing in either tenant (check both tenants' timelines, tasks, and audit views). Do not assert on response timing.
 - Cross-tenant attempts also never appear in tenant B's audit view (nothing happened in tenant B).
 
 ### 5.5 Empty states
@@ -148,7 +163,7 @@ Each criterion from `docs/FIRST_VERTICAL_SLICE.md` with the exact behavior a tes
 | # | Acceptance criterion (verbatim) | Observable behavior / tester procedure |
 |---|---|---|
 | AC-1 | A user can complete the journey from the web interface. | Perform Section 4 steps 1–6 entirely in the browser as a seeded user; every listed observation succeeds. |
-| AC-2 | Unauthorized users cannot read or mutate another tenant's contact. | Section 5.4 test: cross-tenant read and write are indistinguishable from not-found; nothing is created in either tenant. Plus P-AUTH-2/4: no token or no membership → rejected with no data and no side effects. |
+| AC-2 | Unauthorized users cannot read or mutate another tenant's contact. | Section 5.4 test: cross-tenant read and write return the same public HTTP status and error body as a nonexistent record (no timing assertions); nothing is created in either tenant. Plus P-AUTH-2/3a/3b/4: no token, wrong active tenant, or no membership → rejected with no data and no side effects. |
 | AC-3 | A duplicate HTTP request with the same idempotency key produces one interaction and one task. | Section 5.1 test: two submissions, same key → one timeline entry, one open task, both responses reference the same interaction and task IDs. |
 | AC-4 | A duplicate Kafka event produces no duplicate business side effect. | Section 6.2 test: force redelivery of a processed event; re-count tasks, timeline entries, and downstream records — counts unchanged. |
 | AC-5 | Killing and restarting the worker does not lose the event. | Section 6.3 test: stop worker → submit → verify state is pending/published but not processed → restart worker → state reaches processed; invariant counts unchanged. |
@@ -178,7 +193,10 @@ Observable behaviors explicitly **not** in this slice; their absence is not a de
 ## 9. Self-verification against the sprint checklist
 
 - Every FIRST_VERTICAL_SLICE acceptance criterion appears in Section 7 with a tester-performable behavior: yes (AC-1..AC-9).
-- Dev-token auth flow described as user-visible behavior with only credential verification stubbed: Section 2.
-- No behavior requires objects beyond Tenant, User, Membership, Company, Contact, Interaction, Task, Audit event, Outbox event: verified — the outcome list, idempotency key, timeline, processing state, and empty states are attributes or presentations of those nine objects, not new object types.
+- Dev-token auth flow described as user-visible behavior with only credential verification stubbed: Section 2, including multi-tenant membership behavior (P-AUTH-3a) and per-request membership verification (P-AUTH-3b).
+- The outcome vocabulary is defined in this contract (Section 1: five stored tokens with user-visible labels) and is not delegated to any other node.
+- `Tenant.operating_timezone` is defined as a required product property (IANA identifier, Section 1) and is the basis for follow-up-date validation (Section 5.2).
+- Cross-tenant access guarantees are limited to identical public HTTP status and error body versus nonexistent records (Section 5.4); timing side-channel equivalence is explicitly out of scope and not promised.
+- No behavior requires objects beyond Tenant, User, Membership, Company, Contact, Interaction, Task, Audit event, Outbox event: verified — the outcome vocabulary, operating timezone, active tenant, idempotency key, timeline, processing state, and empty states are attributes or presentations of those nine objects, not new object types.
 - Every newly introduced noun is defined in Section 1.
 - No API shapes, no schema/DDL, no infrastructure choices are made here beyond restating frozen decisions and charter invariants.
