@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crmlab:schema:interaction-logged:v1",
+  "title": "interaction.logged payload v1",
+  "description": "Payload schema for event_type interaction.logged, schema_version 1, carried in the payload field of event-envelope.v1. Mirrors the atomic log-interaction write set (database-contract.md section 2 / domain-model.md section 4): the interaction, the mandatory next-action task, and their linkage. Deliberately excludes the free-text note (sensitive CRM content stays out of the event stream; PostgreSQL is authoritative for timeline reads). interaction_id equals the envelope aggregate_id; tenant_id equals the envelope tenant_id; actor_user_id equals the envelope actor_id; occurred_at equals the envelope occurred_at. The outcome enum mirrors Node P's closed vocabulary (product-behavior.md section 1); a vocabulary change requires a new payload schema version. Contract: docs/specs/event-contract.md.",
+  "type": "object",
+  "properties": {
+    "interaction_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The created interaction's id. Equals the envelope's aggregate_id."
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Owning tenant. Equals the envelope's tenant_id."
+    },
+    "contact_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The contact the interaction was logged against (same tenant)."
+    },
+    "company_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The contact's owning company at logging time (same tenant)."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["call"],
+      "description": "Interaction kind; only call exists in this slice."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "connected",
+        "no_answer",
+        "left_voicemail",
+        "meeting_scheduled",
+        "not_interested"
+      ],
+      "description": "Stable outcome token from Node P's closed vocabulary. Tokens are stable even when visible labels change; labels are Node P's."
+    },
+    "next_action_date": {
+      "type": "string",
+      "format": "date",
+      "description": "The required next-action date (task.due_on), a calendar date interpreted in the tenant's operating timezone."
+    },
+    "task_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The mandatory next-action task created atomically with the interaction."
+    },
+    "actor_user_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "user_id of the acting user who logged the interaction. Equals the envelope's actor_id."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC server-assigned interaction.occurred_at. Equals the envelope's occurred_at."
+    }
+  },
+  "required": [
+    "interaction_id",
+    "tenant_id",
+    "contact_id",
+    "company_id",
+    "kind",
+    "outcome",
+    "next_action_date",
+    "task_id",
+    "actor_user_id",
+    "occurred_at"
+  ],
+  "additionalProperties": false
+}
