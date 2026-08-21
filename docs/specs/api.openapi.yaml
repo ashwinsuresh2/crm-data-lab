@@ -1,0 +1,1127 @@
+# OpenAPI 3.0.3 contract - Sprint 0001 Node A (generated alongside docs/specs/api-contract.md,
+# which is normative for behavior; this file is normative for shapes).
+# Frozen upstream: product-behavior.md (P), domain-model.md / database-contract.md (D),
+# local-topology.md (I), WAVE1_FREEZE.md (Obligation 3 discharged by the
+# /v1/interactions/{interactionId}/processing-status endpoint).
+# Confidentiality invariant: no response schema exposes outbox seq, claim_id, claimed_by,
+# lease_expires_at, or the raw envelope payload.
+openapi: "3.0.3"
+info:
+  title: "CRM Data Lab API - First Vertical Slice"
+  version: "0.1.0"
+  description: "Machine-readable contract for Sprint 0001 Node A. Normative behavior companion: docs/specs/api-contract.md. Frozen upstream contracts: product-behavior.md (P), domain-model.md / database-contract.md (D), local-topology.md (I), WAVE1_FREEZE.md. Every /v1 endpoint runs the full pipeline: authenticate (dev token) -> resolve active tenant + membership (every request) -> authorize + tenant-scoped lookups -> validate -> transact (withTenantWrite statement zero) -> respond. Cross-tenant is indistinguishable from nonexistent: 404 with a constant body. All denials are server-logged per P-AUTH-8 (sole source of the field list); token values are never logged."
+servers:
+  -
+    url: "http://127.0.0.1:3001"
+    description: "Local development (loopback only; port = API_PORT, local-topology.md section 4/9)."
+security:
+  -
+    DevToken: []
+tags:
+  -
+    name: "health"
+    description: "Node I infrastructure endpoints; the only endpoints outside the P-AUTH pipeline; no tenant data."
+  -
+    name: "identity"
+  -
+    name: "companies"
+  -
+    name: "contacts"
+  -
+    name: "interactions"
+  -
+    name: "tasks"
+  -
+    name: "audit"
+  -
+    name: "inspection"
+paths:
+  "/livez":
+    get:
+      operationId: "getLivez"
+      summary: "Liveness (owned by Node I; outside the P-AUTH pipeline; no tenant data)."
+      security: []
+      tags:
+        - "health"
+      responses:
+        "200":
+          description: "Process is up and serving HTTP. No dependency checks (local-topology.md section 7)."
+  "/readyz":
+    get:
+      operationId: "getReadyz"
+      summary: "Readiness (owned by Node I; outside the P-AUTH pipeline; no tenant data)."
+      description: "200 only when PostgreSQL is reachable and migrations are applied. Kafka availability must NOT gate readiness; it may be reported informationally in the body (local-topology.md section 7)."
+      security: []
+      tags:
+        - "health"
+      responses:
+        "200":
+          description: "Ready."
+        "503":
+          description: "Not ready (PostgreSQL unreachable or migrations unapplied)."
+  "/v1/me":
+    get:
+      operationId: "getMe"
+      summary: "Acting user and active tenant (P-AUTH-3)."
+      description: "Returns the identity and active tenant resolved from the dev token, including tenant.operating_timezone for client-side date hints (server-side date validation remains authoritative)."
+      tags:
+        - "identity"
+      responses:
+        "200":
+          description: "Resolved current user and active tenant."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Me"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+  "/v1/companies":
+    get:
+      operationId: "listCompanies"
+      summary: "Companies screen list (P section 3.2)."
+      description: "Active tenant's companies with contact counts. Ordering: lower(name) ascending, ties by id ascending. Empty tenant returns an empty items array (never an error)."
+      tags:
+        - "companies"
+      parameters:
+        -
+          "$ref": "#/components/parameters/LimitParam"
+        -
+          "$ref": "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: "Deterministically ordered page of companies."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/CompanyListResponse"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+    post:
+      operationId: "createCompany"
+      summary: "Create company (P section 3.2)."
+      description: "One transaction: withTenantWrite recheck, insert company, append audit_event company.created. No outbox row in this slice (the only event type is interaction.logged)."
+      tags:
+        - "companies"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/CreateCompanyRequest"
+      responses:
+        "201":
+          description: "Created company (contact_count 0). An audit event for the creation is visible in the audit view."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Company"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+  "/v1/companies/{companyId}":
+    get:
+      operationId: "getCompany"
+      summary: "Company screen: company with its contacts (P section 3.3)."
+      tags:
+        - "companies"
+      parameters:
+        -
+          "$ref": "#/components/parameters/CompanyIdParam"
+      responses:
+        "200":
+          description: "Company with embedded contacts (lower(full_name) ascending, ties by id ascending). Null email/phone/last_contacted_at are rendered as absent / never contacted by the UI."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/CompanyDetail"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+  "/v1/companies/{companyId}/contacts":
+    post:
+      operationId: "createContact"
+      summary: "Create contact under a company (P section 3.3)."
+      description: "Parent company resolved tenant-scoped; failure is 404 per P section 5.7 with nothing created. One transaction: withTenantWrite recheck, insert contact (composite-FK-bound to the same-tenant company), append audit_event contact.created. No outbox row in this slice."
+      tags:
+        - "contacts"
+      parameters:
+        -
+          "$ref": "#/components/parameters/CompanyIdParam"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/CreateContactRequest"
+      responses:
+        "201":
+          description: "Created contact (last_contacted_at null = never contacted)."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Contact"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+  "/v1/contacts/{contactId}":
+    get:
+      operationId: "getContact"
+      summary: "Contact header data with owning company (P section 3.4)."
+      tags:
+        - "contacts"
+      parameters:
+        -
+          "$ref": "#/components/parameters/ContactIdParam"
+      responses:
+        "200":
+          description: "Contact detail; last_contacted_at null means never contacted."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/ContactDetail"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+  "/v1/contacts/{contactId}/interactions":
+    get:
+      operationId: "listContactInteractions"
+      summary: "Timeline (P section 3.4)."
+      description: "Ordering: occurred_at descending (newest first), ties by id ascending."
+      tags:
+        - "interactions"
+      parameters:
+        -
+          "$ref": "#/components/parameters/ContactIdParam"
+        -
+          "$ref": "#/components/parameters/LimitParam"
+        -
+          "$ref": "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: "Deterministically ordered page of timeline entries."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/InteractionListResponse"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+    post:
+      operationId: "logInteraction"
+      summary: "Log a call - the transactional write (P section 3.5; D section 2)."
+      description: "ONE PostgreSQL transaction, exactly D section 2: (0) withTenantWrite recheck, (1) idempotency_key reservation, (2) insert interaction (occurred_at = server transaction time), (3) forward-only update of contact.last_contacted_at, (4) insert exactly one open task (server-generated title, due_on = next_action_date), (5) append audit_event interaction.logged (details: task_id, outcome), (6) append outbox_event interaction.logged (envelope event_id = outbox row id; status pending), (7) complete the idempotency row with both result IDs. All commit together or not at all; no network calls inside the transaction. All synchronous results (P section 4 step 5) are visible immediately, even with the worker stopped."
+      tags:
+        - "interactions"
+      parameters:
+        -
+          "$ref": "#/components/parameters/ContactIdParam"
+        -
+          "$ref": "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/LogInteractionRequest"
+      responses:
+        "200":
+          description: "Idempotent replay (same scoped key, same payload, original committed): same body shape and the SAME interaction and task IDs as the original; no writes occurred. Concurrent duplicates: exactly one creation; both responses succeed (201 creator, 200 replayer) with identical IDs (P section 5.1)."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/LogInteractionResponse"
+        "201":
+          description: "Created. Returns the interaction and the full task record with its server-generated title and both IDs (FIRST_VERTICAL_SLICE synchronous step 6)."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/LogInteractionResponse"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/IdempotencyConflict"
+  "/v1/tasks":
+    get:
+      operationId: "listOpenTasks"
+      summary: "Home: acting user's open next-action tasks (P section 3.1)."
+      description: "Fixed filter in this slice: assigned_to = current user AND status = open (no parameters). Ordering exactly per P section 3.1: due_on ascending, ties by created_at ascending, remaining ties by id ascending. Done tasks never appear."
+      tags:
+        - "tasks"
+      parameters:
+        -
+          "$ref": "#/components/parameters/LimitParam"
+        -
+          "$ref": "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: "Deterministically ordered page of denormalized open-task rows (interaction_outcome is the token; the UI renders P's label)."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/TaskListResponse"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+  "/v1/audit-events":
+    get:
+      operationId: "listAuditEvents"
+      summary: "Audit view (P section 3.6)."
+      description: "Tenant-wide audit events. Ordering: occurred_at descending (newest first), ties by id ascending. For interaction.logged rows, details.task_id correlates the interaction (record_id) with its task."
+      tags:
+        - "audit"
+      parameters:
+        -
+          "$ref": "#/components/parameters/LimitParam"
+        -
+          "$ref": "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: "Deterministically ordered page of audit events."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/AuditEventListResponse"
+        "400":
+          "$ref": "#/components/responses/ValidationFailed"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+  "/v1/interactions/{interactionId}/processing-status":
+    get:
+      operationId: "getInteractionProcessingStatus"
+      summary: "Event-processing inspection (WAVE1_FREEZE Obligation 3; P section 6.4)."
+      description: "Authenticated, active-tenant-scoped inspection of the submission's asynchronous path: interaction -> outbox event (aggregate linkage) -> required consumer receipt. Uses the identical pipeline and cross-tenant not-found semantics as every other endpoint. States with strict precedence (D section 7.1): processed, failed (failure_stage publication|consumer, publication-first tie-break with secondary consumer detail), published, pending (including under an active publication lease; honestly glossed as not-yet-confirmed-published). Closes the deferred browser-only portion of AC-1 journey step 6: the browser polls until state is processed (30-second CI bound). Never exposes the outbox sequence number, claim identifiers, lease internals, or the raw envelope payload; last_error values are sanitized per Obligation 2. Read-only; no writes, no audit rows."
+      tags:
+        - "inspection"
+      parameters:
+        -
+          "$ref": "#/components/parameters/InteractionIdParam"
+      responses:
+        "200":
+          description: "Derived processing state for the interaction's outbox event."
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/ProcessingStatus"
+        "401":
+          "$ref": "#/components/responses/Unauthenticated"
+        "403":
+          "$ref": "#/components/responses/Unauthorized"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+components:
+  securitySchemes:
+    DevToken:
+      type: "apiKey"
+      in: "header"
+      name: "X-Dev-Token"
+      description: "Development-only seeded token (local-topology.md section 9 guard; P-AUTH-1..5). Resolves to exactly one user and one active tenant. Only credential verification is stubbed; membership resolution and authorization are real. No production configuration documents or accepts this header."
+  parameters:
+    LimitParam:
+      name: "limit"
+      in: "query"
+      required: false
+      description: "Page size. Out-of-range values are a validation failure."
+      schema:
+        type: "integer"
+        minimum: 1
+        maximum: 200
+        default: 50
+    OffsetParam:
+      name: "offset"
+      in: "query"
+      required: false
+      schema:
+        type: "integer"
+        minimum: 0
+        default: 0
+    CompanyIdParam:
+      name: "companyId"
+      in: "path"
+      required: true
+      schema:
+        type: "string"
+        format: "uuid"
+    ContactIdParam:
+      name: "contactId"
+      in: "path"
+      required: true
+      schema:
+        type: "string"
+        format: "uuid"
+    InteractionIdParam:
+      name: "interactionId"
+      in: "path"
+      required: true
+      schema:
+        type: "string"
+        format: "uuid"
+    IdempotencyKeyHeader:
+      name: "Idempotency-Key"
+      in: "header"
+      required: true
+      description: "Opaque client key, 1-200 chars; scope (tenant, actor, operation, key) per D section 3. Generated once per form instance and reused for retries. Only a committed creation binds the key and its request hash; after a 4xx failure the same key is reusable with a corrected payload (api-contract.md section 6)."
+      schema:
+        type: "string"
+        minLength: 1
+        maxLength: 200
+  responses:
+    Unauthenticated:
+      description: "P-AUTH-2 (missing/unknown/malformed token) or P-AUTH-7 (deactivated user). Constant body; denial logged per P-AUTH-8."
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "unauthenticated"
+              message: "Authentication required."
+    Unauthorized:
+      description: "P-AUTH-4 (no or revoked membership), P-AUTH-6 (suspended tenant), or in-transaction withTenantWrite recheck failure. Constant generic body (does not distinguish causes); denial logged per P-AUTH-8."
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "unauthorized"
+              message: "Not authorized for this tenant."
+    NotFound:
+      description: "Nonexistent record OR cross-tenant record: identical status and byte-identical constant body (P section 5.4). Cross-tenant attempts are server-logged as denials per P-AUTH-8 and never appear in any tenant's audit view."
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "not_found"
+              message: "Not found."
+    ValidationFailed:
+      description: "Field-level validation failure; nothing is created (P sections 5.2/5.3). field_errors names each offending field."
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "validation_failed"
+              message: "Validation failed."
+              field_errors:
+                -
+                  field: "next_action_date"
+                  code: "date_in_past"
+                  message: "Next-action date must be today or later in the tenant's operating timezone."
+    IdempotencyConflict:
+      description: "Same idempotency key (scope: tenant, actor, operation, key) previously committed with a different payload. Nothing is created; original records unchanged (P section 5.1)."
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: "idempotency_key_conflict"
+              message: "This Idempotency-Key was already used with a different payload."
+  schemas:
+    ErrorEnvelope:
+      type: "object"
+      description: "Standard error envelope for every non-2xx response (api-contract.md section 3). Denial bodies (401/403/404) are exact constants; 404 is byte-identical for cross-tenant and nonexistent records (P section 5.4). Messages never contain token material, cross-tenant data, raw event payloads, or internal identifiers."
+      required:
+        - "error"
+      additionalProperties: false
+      properties:
+        error:
+          type: "object"
+          required:
+            - "code"
+            - "message"
+          additionalProperties: false
+          properties:
+            code:
+              type: "string"
+              enum:
+                - "invalid_request"
+                - "validation_failed"
+                - "unauthenticated"
+                - "unauthorized"
+                - "not_found"
+                - "idempotency_key_conflict"
+            message:
+              type: "string"
+            field_errors:
+              type: "array"
+              description: "Present only when code is validation_failed; at least one entry naming the offending request field (or the Idempotency-Key header)."
+              items:
+                "$ref": "#/components/schemas/FieldError"
+    FieldError:
+      type: "object"
+      required:
+        - "field"
+        - "code"
+        - "message"
+      additionalProperties: false
+      properties:
+        field:
+          type: "string"
+          description: "Request field name (e.g. next_action_date, outcome, name, full_name) or the header name Idempotency-Key."
+        code:
+          type: "string"
+        message:
+          type: "string"
+    UserSummary:
+      type: "object"
+      required:
+        - "id"
+        - "display_name"
+        - "email"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        display_name:
+          type: "string"
+        email:
+          type: "string"
+    TenantSummary:
+      type: "object"
+      required:
+        - "id"
+        - "name"
+        - "operating_timezone"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        name:
+          type: "string"
+        operating_timezone:
+          type: "string"
+          description: "IANA timezone identifier (e.g. America/Los_Angeles). Lets the client compute tenant-local today for date-picker pre-validation; the server remains authoritative (api-contract.md section 12, answer 1)."
+    Me:
+      type: "object"
+      required:
+        - "user"
+        - "tenant"
+      additionalProperties: false
+      properties:
+        user:
+          "$ref": "#/components/schemas/UserSummary"
+        tenant:
+          "$ref": "#/components/schemas/TenantSummary"
+    ActorRef:
+      type: "object"
+      required:
+        - "user_id"
+        - "display_name"
+      additionalProperties: false
+      properties:
+        user_id:
+          type: "string"
+          format: "uuid"
+        display_name:
+          type: "string"
+    CompanyRef:
+      type: "object"
+      required:
+        - "id"
+        - "name"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        name:
+          type: "string"
+    ContactRef:
+      type: "object"
+      required:
+        - "id"
+        - "full_name"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        full_name:
+          type: "string"
+    OutcomeToken:
+      type: "string"
+      enum:
+        - "connected"
+        - "no_answer"
+        - "left_voicemail"
+        - "meeting_scheduled"
+        - "not_interested"
+      description: "Closed outcome vocabulary owned by product-behavior.md section 1. The API transports stored tokens only; user-visible labels are rendered by the UI from P's token-to-label table."
+    Company:
+      type: "object"
+      required:
+        - "id"
+        - "tenant_id"
+        - "name"
+        - "contact_count"
+        - "created_at"
+        - "updated_at"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        name:
+          type: "string"
+        contact_count:
+          type: "integer"
+          minimum: 0
+          description: "Count of this company's contacts (P section 3.2 row content)."
+        created_at:
+          type: "string"
+          format: "date-time"
+        updated_at:
+          type: "string"
+          format: "date-time"
+    Contact:
+      type: "object"
+      required:
+        - "id"
+        - "tenant_id"
+        - "company_id"
+        - "full_name"
+        - "email"
+        - "phone"
+        - "last_contacted_at"
+        - "created_at"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        company_id:
+          type: "string"
+          format: "uuid"
+        full_name:
+          type: "string"
+        email:
+          type: "string"
+          nullable: true
+        phone:
+          type: "string"
+          nullable: true
+        last_contacted_at:
+          type: "string"
+          format: "date-time"
+          nullable: true
+          description: "Null means never contacted (P section 3.4). Forward-only; updated inside the log-interaction transaction (D section 2.5)."
+        created_at:
+          type: "string"
+          format: "date-time"
+    CompanyDetail:
+      allOf:
+        -
+          "$ref": "#/components/schemas/Company"
+        -
+          type: "object"
+          required:
+            - "contacts"
+          properties:
+            contacts:
+              type: "array"
+              description: "All contacts of this company, ordered lower(full_name) ascending, ties by id ascending (api-contract.md section 7.4). Unpaginated in this slice."
+              items:
+                "$ref": "#/components/schemas/Contact"
+    ContactDetail:
+      allOf:
+        -
+          "$ref": "#/components/schemas/Contact"
+        -
+          type: "object"
+          required:
+            - "company"
+          properties:
+            company:
+              "$ref": "#/components/schemas/CompanyRef"
+    Interaction:
+      type: "object"
+      required:
+        - "id"
+        - "tenant_id"
+        - "contact_id"
+        - "kind"
+        - "outcome"
+        - "notes"
+        - "occurred_at"
+        - "created_by"
+        - "created_at"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        contact_id:
+          type: "string"
+          format: "uuid"
+        kind:
+          type: "string"
+          enum:
+            - "call"
+        outcome:
+          "$ref": "#/components/schemas/OutcomeToken"
+        notes:
+          type: "string"
+          nullable: true
+        occurred_at:
+          type: "string"
+          format: "date-time"
+          description: "Server-assigned transaction time (D section 2.6); never client-supplied."
+        created_by:
+          "$ref": "#/components/schemas/ActorRef"
+        created_at:
+          type: "string"
+          format: "date-time"
+    Task:
+      type: "object"
+      required:
+        - "id"
+        - "tenant_id"
+        - "contact_id"
+        - "interaction_id"
+        - "title"
+        - "due_on"
+        - "status"
+        - "assigned_to"
+        - "created_at"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        contact_id:
+          type: "string"
+          format: "uuid"
+        interaction_id:
+          type: "string"
+          format: "uuid"
+        title:
+          type: "string"
+          description: "Server-generated from P's outcome-to-title table; never client-supplied."
+        due_on:
+          type: "string"
+          format: "date"
+          description: "Calendar date (next-action date), interpreted against the tenant's operating_timezone (D)."
+        status:
+          type: "string"
+          enum:
+            - "open"
+            - "done"
+          description: "Created open; task lifecycle beyond open is out of scope in this slice (P section 8)."
+        assigned_to:
+          type: "string"
+          format: "uuid"
+        created_at:
+          type: "string"
+          format: "date-time"
+    TaskListItem:
+      type: "object"
+      description: "Denormalized home-screen row (P section 3.1)."
+      required:
+        - "id"
+        - "tenant_id"
+        - "title"
+        - "due_on"
+        - "status"
+        - "contact"
+        - "company"
+        - "interaction_id"
+        - "interaction_outcome"
+        - "created_at"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        title:
+          type: "string"
+        due_on:
+          type: "string"
+          format: "date"
+        status:
+          type: "string"
+          enum:
+            - "open"
+        contact:
+          "$ref": "#/components/schemas/ContactRef"
+        company:
+          "$ref": "#/components/schemas/CompanyRef"
+        interaction_id:
+          type: "string"
+          format: "uuid"
+        interaction_outcome:
+          "$ref": "#/components/schemas/OutcomeToken"
+        created_at:
+          type: "string"
+          format: "date-time"
+    AuditEvent:
+      type: "object"
+      description: "Covers P's five dimensions: actor, tenant, action, record, time (AC-8)."
+      required:
+        - "id"
+        - "tenant_id"
+        - "actor"
+        - "action"
+        - "record_type"
+        - "record_id"
+        - "occurred_at"
+        - "details"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        actor:
+          "$ref": "#/components/schemas/ActorRef"
+        action:
+          type: "string"
+          description: "e.g. company.created, contact.created, interaction.logged."
+        record_type:
+          type: "string"
+        record_id:
+          type: "string"
+          format: "uuid"
+        occurred_at:
+          type: "string"
+          format: "date-time"
+        details:
+          type: "object"
+          additionalProperties: true
+          description: "Small structured context (D section 2.8). For interaction.logged: task_id (uuid) and outcome (token) - the correlation that ties the interaction and its task to one submission (api-contract.md section 12, answer 4)."
+    Pagination:
+      type: "object"
+      required:
+        - "limit"
+        - "offset"
+        - "total"
+      additionalProperties: false
+      properties:
+        limit:
+          type: "integer"
+        offset:
+          type: "integer"
+        total:
+          type: "integer"
+          description: "Total matching rows under the endpoint's fixed filter within the active tenant."
+    CompanyListResponse:
+      type: "object"
+      required:
+        - "items"
+        - "pagination"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Company"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+    InteractionListResponse:
+      type: "object"
+      required:
+        - "items"
+        - "pagination"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Interaction"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+    TaskListResponse:
+      type: "object"
+      required:
+        - "items"
+        - "pagination"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/TaskListItem"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+    AuditEventListResponse:
+      type: "object"
+      required:
+        - "items"
+        - "pagination"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/AuditEvent"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+    CreateCompanyRequest:
+      type: "object"
+      required:
+        - "name"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          minLength: 1
+          maxLength: 300
+          description: "Required; non-empty after trimming leading/trailing whitespace; trimmed value is stored."
+    CreateContactRequest:
+      type: "object"
+      required:
+        - "full_name"
+      additionalProperties: false
+      properties:
+        full_name:
+          type: "string"
+          minLength: 1
+          maxLength: 300
+          description: "Required; non-empty after trim."
+        email:
+          type: "string"
+          nullable: true
+          description: "Optional; omitted and null are equivalent. No format validation beyond length in this slice."
+        phone:
+          type: "string"
+          nullable: true
+          description: "Optional; omitted and null are equivalent."
+    LogInteractionRequest:
+      type: "object"
+      required:
+        - "outcome"
+        - "next_action_date"
+      additionalProperties: false
+      description: "Closed request body (additionalProperties: false). occurred_at is assigned server-side at write time; it is not a request field, and any client attempt to supply it is rejected by this closed schema as an unknown field via the standard validation_failed response. Likewise no kind (fixed to call), no title (server-generated), no IDs. The server-assigned occurred_at is returned in the response's interaction object."
+      properties:
+        outcome:
+          "$ref": "#/components/schemas/OutcomeToken"
+        notes:
+          type: "string"
+          nullable: true
+        next_action_date:
+          type: "string"
+          format: "date"
+          description: "Must be today or later, where today is the current date in the tenant's operating_timezone (P section 5.2); server-evaluated."
+    LogInteractionResponse:
+      type: "object"
+      required:
+        - "interaction"
+        - "task"
+      additionalProperties: false
+      description: "Returned with 201 on creation and byte-equivalent with 200 on idempotent replay; both carry the same interaction and task IDs (AC-3). Includes the full task record (generated title, due_on, status open) so the confirmation UI needs no follow-up fetch (api-contract.md section 12, answer 3)."
+      properties:
+        interaction:
+          "$ref": "#/components/schemas/Interaction"
+        task:
+          "$ref": "#/components/schemas/Task"
+    PublicationDetail:
+      type: "object"
+      required:
+        - "attempt_count"
+        - "last_error"
+      additionalProperties: false
+      properties:
+        attempt_count:
+          type: "integer"
+          minimum: 0
+          description: "Publication attempts so far."
+        last_error:
+          type: "string"
+          nullable: true
+          description: "Bounded, sanitized operator summary (WAVE1_FREEZE Obligation 2); never credentials, tokens, payload contents, notes, or email bodies."
+    ConsumerDetail:
+      type: "object"
+      required:
+        - "status"
+        - "attempt_count"
+        - "first_seen_at"
+        - "last_attempt_at"
+        - "processed_at"
+        - "last_error"
+      additionalProperties: false
+      properties:
+        status:
+          type: "string"
+          enum:
+            - "processing"
+            - "processed"
+            - "failed"
+        attempt_count:
+          type: "integer"
+          minimum: 1
+        first_seen_at:
+          type: "string"
+          format: "date-time"
+        last_attempt_at:
+          type: "string"
+          format: "date-time"
+        processed_at:
+          type: "string"
+          format: "date-time"
+          nullable: true
+        last_error:
+          type: "string"
+          nullable: true
+          description: "Sanitized per Obligation 2."
+    SecondaryFailureDetail:
+      type: "object"
+      description: "Secondary diagnostic when both stages hold failure evidence (publication-first tie-break, P section 6.4). Presentation precedence only; no failure record is erased."
+      required:
+        - "stage"
+        - "last_error"
+        - "attempt_count"
+        - "last_attempt_at"
+      additionalProperties: false
+      properties:
+        stage:
+          type: "string"
+          enum:
+            - "consumer"
+        last_error:
+          type: "string"
+          nullable: true
+        attempt_count:
+          type: "integer"
+        last_attempt_at:
+          type: "string"
+          format: "date-time"
+    FailureDetail:
+      type: "object"
+      required:
+        - "failure_stage"
+        - "last_error"
+        - "secondary"
+      additionalProperties: false
+      properties:
+        failure_stage:
+          type: "string"
+          enum:
+            - "publication"
+            - "consumer"
+          description: "publication when the outbox is failed (including when both stages failed - tie-break per P section 6.4); consumer when only the receipt is failed."
+        last_error:
+          type: "string"
+          description: "Sanitized last error of the reported failure_stage (Obligation 2)."
+        secondary:
+          nullable: true
+          allOf:
+            -
+              "$ref": "#/components/schemas/SecondaryFailureDetail"
+    ProcessingStatus:
+      type: "object"
+      description: "Event-processing inspection (WAVE1_FREEZE Obligation 3; P section 6.4; D section 7.1). State precedence, first match wins: processed, failed, published, pending (pending includes an active publication lease). Confidentiality: this response never contains the outbox sequence number, claim identifiers, lease internals, the raw envelope payload, or any cross-tenant data."
+      required:
+        - "interaction_id"
+        - "event_id"
+        - "event_type"
+        - "state"
+        - "staged_at"
+        - "published_at"
+        - "processed_at"
+        - "publication"
+        - "consumer"
+        - "failure"
+      additionalProperties: false
+      properties:
+        interaction_id:
+          type: "string"
+          format: "uuid"
+        event_id:
+          type: "string"
+          format: "uuid"
+          description: "The outbox event id; equals the envelope's event_id (frozen Node E seam, D section 2.9)."
+        event_type:
+          type: "string"
+          description: "interaction.logged in this slice."
+        state:
+          type: "string"
+          enum:
+            - "pending"
+            - "published"
+            - "processed"
+            - "failed"
+        staged_at:
+          type: "string"
+          format: "date-time"
+          description: "When the outbox row was committed with the interaction (same transaction)."
+        published_at:
+          type: "string"
+          format: "date-time"
+          nullable: true
+        processed_at:
+          type: "string"
+          format: "date-time"
+          nullable: true
+        publication:
+          "$ref": "#/components/schemas/PublicationDetail"
+        consumer:
+          nullable: true
+          allOf:
+            -
+              "$ref": "#/components/schemas/ConsumerDetail"
+          description: "Null until the required consumer has recorded a receipt."
+        failure:
+          nullable: true
+          allOf:
+            -
+              "$ref": "#/components/schemas/FailureDetail"
+          description: "Present iff state is failed."
