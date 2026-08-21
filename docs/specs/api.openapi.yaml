@@ -4,7 +4,8 @@
 # local-topology.md (I), WAVE1_FREEZE.md (Obligation 3 discharged by the
 # /v1/interactions/{interactionId}/processing-status endpoint).
 # Confidentiality invariant: no response schema exposes outbox seq, claim_id, claimed_by,
-# lease_expires_at, or the raw envelope payload.
+# lease_expires_at, the raw envelope payload, or Kafka topic/partition/offset detail
+# (processing-status responses are allowlisted; see the ProcessingStatus schema).
 openapi: "3.0.3"
 info:
   title: "CRM Data Lab API - First Vertical Slice"
@@ -325,7 +326,7 @@ paths:
     get:
       operationId: "getInteractionProcessingStatus"
       summary: "Event-processing inspection (WAVE1_FREEZE Obligation 3; P section 6.4)."
-      description: "Authenticated, active-tenant-scoped inspection of the submission's asynchronous path: interaction -> outbox event (aggregate linkage) -> required consumer receipt. Uses the identical pipeline and cross-tenant not-found semantics as every other endpoint. States with strict precedence (D section 7.1): processed, failed (failure_stage publication|consumer, publication-first tie-break with secondary consumer detail), published, pending (including under an active publication lease; honestly glossed as not-yet-confirmed-published). Closes the deferred browser-only portion of AC-1 journey step 6: the browser polls until state is processed (30-second CI bound). Never exposes the outbox sequence number, claim identifiers, lease internals, or the raw envelope payload; last_error values are sanitized per Obligation 2. Read-only; no writes, no audit rows."
+      description: "Authenticated, active-tenant-scoped inspection of the submission's asynchronous path: interaction -> outbox event (aggregate linkage) -> required consumer receipt. Uses the identical pipeline and cross-tenant not-found semantics as every other endpoint. States with strict precedence (D section 7.1): processed, failed (failure_stage publication|consumer, publication-first tie-break with secondary consumer detail), published, pending (including under an active publication lease; honestly glossed as not-yet-confirmed-published). Closes the deferred browser-only portion of AC-1 journey step 6: the browser polls until state is processed (30-second CI bound). Response allowlist (defense in depth): only the ProcessingStatus schema's declared properties may appear - never Kafka topic, Kafka partition, Kafka offset, outbox seq, claim_id, claimed_by, lease_expires_at, or the raw envelope payload; last_error values carry only the sanitized error code and safe summary per Obligation 2. Read-only; no writes, no audit rows."
       tags:
         - "inspection"
       parameters:
@@ -657,30 +658,83 @@ components:
           type: "string"
           format: "date-time"
     CompanyDetail:
-      allOf:
-        -
-          "$ref": "#/components/schemas/Company"
-        -
-          type: "object"
-          required:
-            - "contacts"
-          properties:
-            contacts:
-              type: "array"
-              description: "All contacts of this company, ordered lower(full_name) ascending, ties by id ascending (api-contract.md section 7.4). Unpaginated in this slice."
-              items:
-                "$ref": "#/components/schemas/Contact"
+      type: "object"
+      description: "Company screen payload (P section 3.3): every Company field plus the embedded contacts list. Deliberately a flattened final schema (no allOf) so additionalProperties: false is evaluated against the complete shape."
+      required:
+        - "id"
+        - "tenant_id"
+        - "name"
+        - "contact_count"
+        - "created_at"
+        - "updated_at"
+        - "contacts"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        name:
+          type: "string"
+        contact_count:
+          type: "integer"
+          minimum: 0
+          description: "Count of this company's contacts (P section 3.2 row content)."
+        created_at:
+          type: "string"
+          format: "date-time"
+        updated_at:
+          type: "string"
+          format: "date-time"
+        contacts:
+          type: "array"
+          description: "All contacts of this company, ordered lower(full_name) ascending, ties by id ascending (api-contract.md section 7.4). Unpaginated in this slice."
+          items:
+            "$ref": "#/components/schemas/Contact"
     ContactDetail:
-      allOf:
-        -
-          "$ref": "#/components/schemas/Contact"
-        -
-          type: "object"
-          required:
-            - "company"
-          properties:
-            company:
-              "$ref": "#/components/schemas/CompanyRef"
+      type: "object"
+      description: "Contact screen payload (P section 3.4): every Contact field plus the owning company. Flattened final schema (no allOf) so additionalProperties: false is evaluated against the complete shape."
+      required:
+        - "id"
+        - "tenant_id"
+        - "company_id"
+        - "full_name"
+        - "email"
+        - "phone"
+        - "last_contacted_at"
+        - "created_at"
+        - "company"
+      additionalProperties: false
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        tenant_id:
+          type: "string"
+          format: "uuid"
+        company_id:
+          type: "string"
+          format: "uuid"
+        full_name:
+          type: "string"
+        email:
+          type: "string"
+          nullable: true
+        phone:
+          type: "string"
+          nullable: true
+        last_contacted_at:
+          type: "string"
+          format: "date-time"
+          nullable: true
+          description: "Null means never contacted (P section 3.4). Forward-only; updated inside the log-interaction transaction (D section 2.5)."
+        created_at:
+          type: "string"
+          format: "date-time"
+        company:
+          "$ref": "#/components/schemas/CompanyRef"
     Interaction:
       type: "object"
       required:
@@ -759,8 +813,7 @@ components:
           type: "string"
           enum:
             - "open"
-            - "done"
-          description: "Created open; task lifecycle beyond open is out of scope in this slice (P section 8)."
+          description: "Always open on this API surface: every Sprint-0001 task is created open, no endpoint completes tasks, and GET /v1/tasks returns open tasks only (P section 8). The database models open|done (D section 2.7); exposing done is a future additive change."
         assigned_to:
           type: "string"
           format: "uuid"
@@ -967,7 +1020,7 @@ components:
         - "interaction"
         - "task"
       additionalProperties: false
-      description: "Returned with 201 on creation and byte-equivalent with 200 on idempotent replay; both carry the same interaction and task IDs (AC-3). Includes the full task record (generated title, due_on, status open) so the confirmation UI needs no follow-up fetch (api-contract.md section 12, answer 3)."
+      description: "Returned with 201 on creation and byte-equivalent with 200 on idempotent replay; both carry the same interaction and task IDs (AC-3). Includes the complete next-action task record (generated title, due_on, status open) so the confirmation UI needs no additional request (api-contract.md section 12, answer 3)."
       properties:
         interaction:
           "$ref": "#/components/schemas/Interaction"
@@ -987,88 +1040,10 @@ components:
         last_error:
           type: "string"
           nullable: true
-          description: "Bounded, sanitized operator summary (WAVE1_FREEZE Obligation 2); never credentials, tokens, payload contents, notes, or email bodies."
-    ConsumerDetail:
-      type: "object"
-      required:
-        - "status"
-        - "attempt_count"
-        - "first_seen_at"
-        - "last_attempt_at"
-        - "processed_at"
-        - "last_error"
-      additionalProperties: false
-      properties:
-        status:
-          type: "string"
-          enum:
-            - "processing"
-            - "processed"
-            - "failed"
-        attempt_count:
-          type: "integer"
-          minimum: 1
-        first_seen_at:
-          type: "string"
-          format: "date-time"
-        last_attempt_at:
-          type: "string"
-          format: "date-time"
-        processed_at:
-          type: "string"
-          format: "date-time"
-          nullable: true
-        last_error:
-          type: "string"
-          nullable: true
-          description: "Sanitized per Obligation 2."
-    SecondaryFailureDetail:
-      type: "object"
-      description: "Secondary diagnostic when both stages hold failure evidence (publication-first tie-break, P section 6.4). Presentation precedence only; no failure record is erased."
-      required:
-        - "stage"
-        - "last_error"
-        - "attempt_count"
-        - "last_attempt_at"
-      additionalProperties: false
-      properties:
-        stage:
-          type: "string"
-          enum:
-            - "consumer"
-        last_error:
-          type: "string"
-          nullable: true
-        attempt_count:
-          type: "integer"
-        last_attempt_at:
-          type: "string"
-          format: "date-time"
-    FailureDetail:
-      type: "object"
-      required:
-        - "failure_stage"
-        - "last_error"
-        - "secondary"
-      additionalProperties: false
-      properties:
-        failure_stage:
-          type: "string"
-          enum:
-            - "publication"
-            - "consumer"
-          description: "publication when the outbox is failed (including when both stages failed - tie-break per P section 6.4); consumer when only the receipt is failed."
-        last_error:
-          type: "string"
-          description: "Sanitized last error of the reported failure_stage (Obligation 2)."
-        secondary:
-          nullable: true
-          allOf:
-            -
-              "$ref": "#/components/schemas/SecondaryFailureDetail"
+          description: "Only the contractually sanitized error code and safe operator summary (WAVE1_FREEZE Obligation 2); never credentials, tokens, payload contents, notes, email bodies, or Kafka topic/partition/offset detail."
     ProcessingStatus:
       type: "object"
-      description: "Event-processing inspection (WAVE1_FREEZE Obligation 3; P section 6.4; D section 7.1). State precedence, first match wins: processed, failed, published, pending (pending includes an active publication lease). Confidentiality: this response never contains the outbox sequence number, claim identifiers, lease internals, the raw envelope payload, or any cross-tenant data."
+      description: "Event-processing inspection (WAVE1_FREEZE Obligation 3; P section 6.4; D section 7.1). State precedence, first match wins: processed, failed, published, pending (pending includes an active publication lease). RESPONSE ALLOWLIST (defense in depth): only the properties declared in this schema may ever appear; the response never contains Kafka topic, Kafka partition, Kafka offset, outbox seq, claim_id, claimed_by, lease_expires_at, the raw envelope payload, or any cross-tenant data. last_error fields carry only the sanitized error code and safe summary (Node E bans topic/partition/offset from last_error at the source; this allowlist is the API's defense-in-depth layer)."
       required:
         - "interaction_id"
         - "event_id"
@@ -1114,14 +1089,81 @@ components:
         publication:
           "$ref": "#/components/schemas/PublicationDetail"
         consumer:
+          type: "object"
           nullable: true
-          allOf:
-            -
-              "$ref": "#/components/schemas/ConsumerDetail"
-          description: "Null until the required consumer has recorded a receipt."
+          description: "The required consumer's receipt detail. MUST be null before a receipt exists (inline nullable object; valid OpenAPI 3.0.3 composition)."
+          required:
+            - "status"
+            - "attempt_count"
+            - "first_seen_at"
+            - "last_attempt_at"
+            - "processed_at"
+            - "last_error"
+          additionalProperties: false
+          properties:
+            status:
+              type: "string"
+              enum:
+                - "processing"
+                - "processed"
+                - "failed"
+            attempt_count:
+              type: "integer"
+              minimum: 1
+            first_seen_at:
+              type: "string"
+              format: "date-time"
+            last_attempt_at:
+              type: "string"
+              format: "date-time"
+            processed_at:
+              type: "string"
+              format: "date-time"
+              nullable: true
+            last_error:
+              type: "string"
+              nullable: true
+              description: "Sanitized error code + safe summary only (Obligation 2); never Kafka topic/partition/offset detail."
         failure:
+          type: "object"
           nullable: true
-          allOf:
-            -
-              "$ref": "#/components/schemas/FailureDetail"
-          description: "Present iff state is failed."
+          description: "MUST be null whenever state is not failed; non-null iff state is failed (inline nullable object; valid OpenAPI 3.0.3 composition)."
+          required:
+            - "failure_stage"
+            - "last_error"
+            - "secondary"
+          additionalProperties: false
+          properties:
+            failure_stage:
+              type: "string"
+              enum:
+                - "publication"
+                - "consumer"
+              description: "publication when the outbox is failed (including when both stages failed - tie-break per P section 6.4); consumer when only the receipt is failed."
+            last_error:
+              type: "string"
+              description: "Sanitized last error of the reported failure_stage (Obligation 2); never Kafka topic/partition/offset detail."
+            secondary:
+              type: "object"
+              nullable: true
+              description: "Secondary consumer diagnostic under the publication-first tie-break. MUST be null unless BOTH failure stages hold evidence (P section 6.4). Presentation precedence only; no failure record is erased."
+              required:
+                - "stage"
+                - "last_error"
+                - "attempt_count"
+                - "last_attempt_at"
+              additionalProperties: false
+              properties:
+                stage:
+                  type: "string"
+                  enum:
+                    - "consumer"
+                last_error:
+                  type: "string"
+                  nullable: true
+                  description: "Sanitized per Obligation 2."
+                attempt_count:
+                  type: "integer"
+                last_attempt_at:
+                  type: "string"
+                  format: "date-time"

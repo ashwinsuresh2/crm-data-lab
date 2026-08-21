@@ -508,15 +508,26 @@ assertions move from the P §6.6 database carve-out to this surface.
   The four states are mutually exclusive by construction; the browser journey can
   observe all four (pending with attempt/last-error detail, published, processed,
   failed with stage and errors), satisfying Obligation 3.
-- **Confidentiality (D §7.1 rule; Obligation 3):** the response **never** contains
-  `seq`, `claim_id`, the raw envelope `payload`, or any cross-tenant data.
-  Additionally, lease internals (`claimed_by`, `lease_expires_at`) are **not**
-  exposed on this tenant-facing surface: P §6.4/§1 declare the publication lease
-  internal with pending-state as its only observable effect, and worker identity
-  serves no browser-journey purpose; operators retain database-level access
-  (P §6.6 residual carve-out). All `last_error` values surfaced here are the
-  bounded, sanitized operator summaries mandated by WAVE1_FREEZE Obligation 2
-  (Node E) — never credentials, tokens, payload contents, notes, or email bodies.
+- **Confidentiality — response allowlist (D §7.1 rule; Obligation 3; defense in
+  depth):** the response contains **exactly** the fields declared above —
+  `interaction_id`, `event_id`, `event_type`, `state`, `staged_at`,
+  `published_at`, `processed_at`, `publication` (`attempt_count`, `last_error`),
+  `consumer` (receipt status/attempts/timestamps/`last_error`), and `failure`
+  (`failure_stage`, `last_error`, `secondary`) — and nothing else; the OpenAPI
+  `ProcessingStatus` schema enforces this with `additionalProperties: false`.
+  In particular the response **never** exposes: **Kafka topic, Kafka partition,
+  Kafka offset, `seq`, `claim_id`, `claimed_by`, `lease_expires_at`**, the raw
+  envelope `payload`, or any cross-tenant data. Every `last_error` field carries
+  **only the contractually sanitized error code and safe operator-facing
+  summary** mandated by WAVE1_FREEZE Obligation 2 — never credentials, tokens,
+  payload contents, notes, email bodies, or broker coordinates. Node E
+  simultaneously bans topic/partition/offset from `last_error` at the source;
+  this allowlist is the API's independent defense-in-depth layer, so a value
+  that escapes source sanitization still has no field through which broker or
+  coordination detail could reach a tenant. Lease internals are additionally
+  withheld because P §6.4/§1 declare the publication lease internal, with
+  pending-state as its only observable effect; operators retain database-level
+  access (P §6.6 residual carve-out).
 
 ## 10. Traceability: P screens and acceptance criteria → API
 
@@ -565,8 +576,8 @@ Four UX-architecture seam questions, answered normatively:
    different — payload; no key regeneration is required after a validation
    error. Only a committed creation binds the key + request hash; `409` applies
    only after such a commit.
-3. **The success response carries the full task record — no follow-up fetch
-   needed.** §7.8's `201`/`200` body includes the complete `task` object:
+3. **The success response carries the complete next-action task record — no
+   additional request needed.** §7.8's `201`/`200` body includes the complete `task` object:
    server-generated `title` (P's exact outcome→title string), `due_on`,
    `status: "open"`, `contact_id`, `interaction_id`, `assigned_to`, `created_at`
    — sufficient for the confirmation UI ("interaction logged and next-action
@@ -598,8 +609,11 @@ Four UX-architecture seam questions, answered normatively:
 - Obligation 3 discharged: authenticated, active-tenant-scoped, cross-tenant
   not-found, all four states with `failure_stage`, publication-first tie-break,
   last error, secondary consumer detail: §9.
-- `seq` and `claim_id` appear in no response schema (checked mechanically against
-  the OpenAPI file); lease internals withheld with rationale: §9.
+- Confidentiality checked mechanically against the OpenAPI file: `seq`,
+  `claim_id`, `claimed_by`, `lease_expires_at`, and `payload` appear in no
+  response schema anywhere; the `ProcessingStatus` subtree additionally bans
+  Kafka topic/partition/offset property names and its top-level properties match
+  the §9 allowlist exactly; lease internals withheld with rationale: §9.
 - No endpoint bypasses the P-AUTH pipeline except I-owned `/livez`/`/readyz`,
   which return no tenant data: §2.3.
 - Denial logging references P-AUTH-8 as sole source; no field list redefined: §2.2.
