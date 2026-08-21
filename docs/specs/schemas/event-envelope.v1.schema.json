@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:crmlab:schema:event-envelope:v1",
   "title": "CRM event envelope v1",
-  "description": "The complete Kafka message value for topic crm.events.v1. Exactly twelve fields (frozen Sprint 0001 decision). event_id MUST equal outbox_event.id (database-contract.md section 5, ratified invariant). schema_version is the major version of the payload schema for this event_type; it selects the payload schema file (e.g. interaction.logged + 1 -> interaction-logged.v1.schema.json). Contract: docs/specs/event-contract.md.",
+  "description": "The complete Kafka message value for topic crm.events.v1. Exactly twelve fields (frozen Sprint 0001 decision). event_id MUST equal outbox_event.id (database-contract.md section 5, ratified invariant). schema_version is the major version of the payload schema for this event_type; it selects the payload schema file (e.g. interaction.logged + 1 -> interaction-logged.v1.schema.json). Validators MUST evaluate this schema with draft 2020-12 format assertion enabled (e.g. Ajv strict + ajv-formats in assertion mode); format-as-annotation does not satisfy the contract (event-contract.md section 3.4). Contract: docs/specs/event-contract.md.",
   "type": "object",
   "properties": {
     "event_id": {
