@@ -86,9 +86,11 @@ new-topic addition, not a breaking change.
 
 Bounded retention is safe **because Kafka is not the system of record**:
 PostgreSQL's outbox holds every event durably and forever in the slice (D §7),
-and the replay procedure (Section 8.3) can reconstruct the topic — the
-loss-of-nothing acceptance criteria rest on the outbox, never on Kafka
-retention.
+and the replay procedure (Section 8.3) can republish every surviving outbox
+event as **new** Kafka records carrying the same logical envelope values — it
+does not resurrect the original records, their offsets, or their original
+interleaving. The loss-of-nothing acceptance criteria rest on the outbox,
+never on Kafka retention.
 
 I §8's example commands happen to use `crm.events.v1` and `crm-worker`; this
 section is what makes those names real. That is a deliberate convergence, not
@@ -138,6 +140,14 @@ is self-contained, and D §4 mirrors those values into columns for SQL-level
 querying. The producer obligation that they be **equal** is normative
 (Section 6.2).
 
+**Data minimization (normative):** the interaction's free-text notes are
+**intentionally excluded** from the `interaction.logged` payload, and
+sensitive free-text CRM content is excluded from every event payload in this
+slice. The event stream carries identifiers, stable tokens, dates, and
+timestamps only; timeline text is read from PostgreSQL, which is
+authoritative. (Stated here as contract prose, not only in the payload
+schema's description.)
+
 ### 3.1 Strictness
 
 `additionalProperties: false` at the envelope level, on both producer and
@@ -164,6 +174,22 @@ payload only.
 - Consumers are deployed to understand a new (`event_type`, `schema_version`)
   **before** any producer emits it (Section 7.2 defines what happens if this
   rule is violated).
+
+### 3.4 Validator requirements (normative)
+
+- Producer-side and consumer-side validation (Sections 6.1, 7.1) MUST use a
+  JSON Schema **draft 2020-12** validator with **format assertion enabled** —
+  e.g. Ajv in strict mode with `ajv-formats` in assertion mode, or an
+  equivalent. Draft 2020-12 treats `format` as annotation by default;
+  format-as-annotation does **not** satisfy this contract.
+- Consequently each of these MUST fail envelope validation:
+  `event_id = "banana"`, `tenant_id = "banana"`, `actor_id = "banana"`,
+  `occurred_at = "not-a-date"` — and the analogous payload fields
+  (`interaction_id`, `tenant_id`, `contact_id`, `company_id`, `task_id`,
+  `actor_user_id`, `occurred_at`, `next_action_date`) fail payload validation
+  under the same rule.
+- Explicit negative fixtures for the UUID and date-time (and date) formats are
+  part of the required test set (Section 10).
 
 ---
 
@@ -245,6 +271,11 @@ Before publish, the publisher asserts, and tests must prove:
   `envelope.aggregate_type == outbox_event.aggregate_type`,
   `envelope.aggregate_id == outbox_event.aggregate_id`,
   `envelope.aggregate_version == outbox_event.aggregate_version`.
+- Envelope ↔ payload equalities for `interaction.logged`:
+  `payload.interaction_id == envelope.aggregate_id`,
+  `payload.tenant_id == envelope.tenant_id`,
+  `payload.actor_user_id == envelope.actor_id`,
+  `payload.occurred_at == envelope.occurred_at`.
 
 Linkage mapping for the slice event, normative:
 
@@ -255,9 +286,10 @@ Linkage mapping for the slice event, normative:
 | `aggregate_id` | the `interaction.id` created in the same transaction |
 | `aggregate_version` | `1` |
 
-Any mismatch is a producer bug: treated as a non-retryable publication failure
-(Section 8.1), never "fixed up" in flight — the outbox row is the audit trail
-of what was staged.
+Any mismatch — in either checklist above — is a producer bug: recorded with
+code `EVENT_LINKAGE_MISMATCH` (Section 9) and treated as a non-retryable
+publication failure (Section 8.1), never "fixed up" in flight — the outbox row
+is the audit trail of what was staged.
 
 ### 6.3 Publish mechanics
 
@@ -301,10 +333,16 @@ succeed, so they are never retried in-process.
   `event_id`/`tenant_id` resolve to an existing outbox row (the receipt's
   composite FK can hold). This covers payload-schema failures, unknown
   `event_type`, and unknown `schema_version`. The consumer records a `failed`
-  receipt immediately (D §6 step C shape, without a work transaction), with
-  error code `EVENT_SCHEMA_INVALID`, `EVENT_TYPE_UNKNOWN`, or
-  `EVENT_SCHEMA_VERSION_UNKNOWN` (Section 9), then parks the message
-  (Section 8.2): commits the offset and moves on. The event surfaces as state
+  receipt via the **atomic create-or-update park write (Section 8.2.1)** —
+  which creates the receipt even when no receipt row exists yet (a zero-row
+  `UPDATE` against a nonexistent receipt is not a valid mechanism) and
+  preserves the skip-on-processed rule — with error code
+  `EVENT_SCHEMA_INVALID`, `EVENT_TYPE_UNKNOWN`, or
+  `EVENT_SCHEMA_VERSION_UNKNOWN` (Section 9). The Kafka offset is committed
+  **only after** the failed receipt is durably recorded — or after the upsert
+  reports the receipt is already `processed`, in which case this is a
+  duplicate delivery (e.g. redelivered after a validator change) and is
+  skip-and-acked with the receipt untouched. The event surfaces as state
   **failed** / `failure_stage = consumer` (P §6.4, D §7.1). Unknown
   types/versions park visibly rather than skip silently because this
   consumer's contract is a receipt for *every* event; the deploy-consumers-
@@ -313,8 +351,10 @@ succeed, so they are never retried in-process.
   envelope validation, or names an (`event_id`, `tenant_id`) with no matching
   outbox row (the receipt insert would violate its FK). No receipt is
   possible. The consumer writes a sanitized structured line to the protected
-  process log — topic, partition, offset, error code, byte length; **never the
-  raw bytes** (Section 9) — commits the offset, and continues. In the slice
+  process log — topic, partition, offset (Kafka coordinates are permitted
+  **only** in this protected log — Section 9 rule 2), error code, byte length;
+  **never the raw bytes** (Section 9) — commits the offset, and continues. In
+  the slice
   the only writer is our own publisher, so tier 2 indicates a serious bug or a
   foreign producer; detection is the log line plus the monitoring signal that
   an outbox row sits `published` with no receipt past the 30-second bound
@@ -339,6 +379,15 @@ lifecycle: the consumer commits an offset **only after** the receipt outcome
 for that message is decided — `processed` (fresh or duplicate-skip) or parked
 per Section 7.2/8.2. A crash before the commit redelivers the message;
 receipts make redelivery harmless. Auto-commit is disabled.
+
+**Park is not "processed" (normative clarification):** committing an offset on
+park is a transport-level statement only — "this group will not automatically
+redeliver this record" — and is **not** the "acknowledge as successfully
+processed" that D §6's zero-row re-read finalization rule forbids. The durable
+truth about processing is always the receipt: a parked event's receipt says
+`failed`, the four-state surface shows **failed**, and the event remains
+re-drivable (Section 8.2). Nothing here weakens D §6's rule that zero rows
+updated is never proof of successful prior processing.
 
 ### 7.4 Replayability and observability
 
@@ -372,9 +421,17 @@ first-class; the extra topic is not needed to achieve it.
 Mechanics are D §5's; this section supplies the policy D delegates.
 
 - **Attempt accounting:** `outbox_event.attempt_count` increments on every
-  claim (D §5 step 1).
+  claim (D §5 step 1); the value is contractually available to this policy via
+  the claim's `RETURNING` list (human-approved Wave-1 amendment to D §5).
 - **Ceiling:** `MAX_PUBLISH_ATTEMPTS = 10` (worker configuration; 10 is the
   contract default).
+- **Lease default (AC-5 reconciliation):** D §5 leaves the lease length to
+  worker configuration (its illustrative SQL shows 30 s). This contract pins
+  the default publication lease to **10 seconds** — deliberately well under
+  the 30-second AC-5 bound — so a worker killed mid-claim leaves an orphaned
+  lease that expires and is re-claimed quickly enough for re-publish and
+  consumption to complete within the bound. The AC-5 clock starts at worker
+  restart (P §6.3).
 - **Retryable failure** (broker unreachable, timeout, transient send error)
   with `attempt_count < 10`: run D §5's publish-failure update (row stays
   `pending`, claim cleared, sanitized `last_error` recorded). The row becomes
@@ -400,14 +457,58 @@ Mechanics are D §5's; this section supplies the policy D delegates.
   claimed_by=NULL, lease_expires_at=NULL WHERE id=$event_id AND
   status='failed'` (`last_error` retained until the next attempt overwrites
   it). The publisher then picks it up normally. This is the only path out of
-  publication-failed.
+  publication-failed. Resurrection performs exactly this one outbox `UPDATE`:
+  no receipt rows are written and no consumer offset is touched.
 
 ### 8.2 Stage (b): consumer failures (Kafka → receipt)
 
 Mechanics are D §6's; this section supplies the retry policy D §6 points at.
+Every transition below states which receipt/outbox writes occur and when the
+Kafka offset commits.
+
+#### 8.2.1 The failed-receipt park write (atomic upsert, normative)
+
+Tier-1 invalid events (Section 7.2) and ceiling parking both require a
+`failed` receipt to exist **even when no receipt row exists yet**. A zero-row
+`UPDATE` against a nonexistent receipt is **not** a valid mechanism; the park
+write is an atomic create-or-update upsert (illustrative SQL, receipt DDL is
+D §4's):
+
+```sql
+INSERT INTO consumer_receipt
+       (consumer_name, event_id, tenant_id, status, attempt_count,
+        first_seen_at, last_attempt_at, last_error)
+VALUES ($consumer, $event_id, $tenant, 'failed', 1, now(), now(), $safe_error)
+ON CONFLICT (consumer_name, event_id) DO UPDATE
+   SET status          = 'failed',
+       attempt_count   = consumer_receipt.attempt_count + 1,
+       last_attempt_at = now(),
+       last_error      = EXCLUDED.last_error
+ WHERE consumer_receipt.status <> 'processed'
+RETURNING status;
+-- 1 row  → the failed receipt is durably recorded, carrying tenant_id,
+--          consumer_name, event_id, status='failed', attempt_count,
+--          first_seen_at, last_attempt_at, processed_at = NULL (so D §4's
+--          CHECK holds), and a sanitized last_error. ONLY NOW may the Kafka
+--          offset be committed.
+-- 0 rows → the existing receipt is 'processed' (e.g. an already-processed
+--          event redelivered after a validator change): skip-and-ack — the
+--          receipt is untouched and the offset commits as a duplicate-skip.
+--          D §6's skip-on-processed rule is preserved exactly.
+```
+
+`$safe_error` is a Section 9 sanitized `CODE: summary`. If this upsert itself
+fails, the offset is **not** committed; the message will be redelivered and
+the park re-attempted (`RECEIPT_WRITE_FAILED` detail in the protected process
+log).
+
+#### 8.2.2 Policy
 
 - **Attempt accounting:** `consumer_receipt.attempt_count` increments on every
-  attempt-start upsert (D §6 step 1), across deliveries and restarts.
+  attempt-start upsert (D §6 step 1) and every 8.2.1 park write, across
+  deliveries and restarts; the value is contractually available via the
+  attempt-start operation's `RETURNING` list (human-approved Wave-1 amendment
+  to D §6).
 - **Ceiling:** `MAX_CONSUME_ATTEMPTS = 10` (worker configuration; contract
   default 10), evaluated against `consumer_receipt.attempt_count`.
 - **Retryable failure** (receipt/work transaction fails: PostgreSQL
@@ -415,18 +516,28 @@ Mechanics are D §6's; this section supplies the retry policy D §6 points at.
   `failed` receipt best-effort (D §6 step 3), do **not** commit the offset,
   **seek back** to the failed message's offset, and retry through the full
   path (attempt-start upsert included) after an in-process backoff of
-  1 s doubling to a 30 s cap. Seek-back blocks the partition, which is
-  acceptable and even desirable at slice scale (one partition; blocking
-  preserves per-tenant order while a transient fault heals) — this is the
-  **redelivery-through-the-real-path** retry, the same at-least-once condition
-  the canonical offset-reset tooling (I §8) exercises in tests.
+  1 s doubling to a 30 s cap. This is the **redelivery-through-the-real-path**
+  retry, the same at-least-once condition the canonical offset-reset tooling
+  (I §8) exercises in tests.
+- **Cross-tenant head-of-line blocking (named, accepted slice-scale risk):**
+  seek-back blocks the entire partition, and with the slice's single partition
+  that means one tenant's failing event delays **every** tenant's events for
+  up to the bounded retry window. This is accepted for the slice (seeded
+  internal tenants only, bounded by the ceiling and backoff cap).
+  **Pre-external-exposure requirement:** before any external tenant or
+  non-local exposure, partition/tenant fairness or bounded blocking must be
+  introduced (e.g. multiple partitions keyed by `tenant_id` plus a bounded
+  per-message retry budget) — recorded alongside P's pre-exposure
+  requirements (the P-AUTH-8 rate-limiting precedent).
 - **Parking (dead-letter):** when an attempt fails and `attempt_count ≥ 10`,
   or on any deterministic tier-1 validation failure (Section 7.2, no retries
-  at all): ensure the receipt is `failed` with a sanitized `last_error`
-  (Section 9), **commit the offset**, and move on. The partition unblocks; the
-  event is parked as state **failed** / `failure_stage = consumer`, visible
-  with `attempt_count`, timestamps, and `last_error` via D §7 / Node A's
-  surface.
+  at all): run the **8.2.1 park write**; only after it durably records the
+  `failed` receipt (sanitized `last_error`, Section 9) is the offset
+  committed, and the consumer moves on. The partition unblocks; the event is
+  parked as state **failed** / `failure_stage = consumer`, visible with
+  `attempt_count`, timestamps, and `last_error` via D §7 / Node A's surface.
+  Committing the offset here is transport-level only — not a claim of
+  successful processing (Section 7.3's park-is-not-processed clarification).
 - **Re-drive of parked events:** a `failed` receipt is **never** permanently
   unprocessable — D §6's ratified skip rule (skip only on `processed`) is
   untouched. The ceiling bounds the *automatic in-process* retry loop only.
@@ -450,19 +561,30 @@ Mechanics are D §6's; this section supplies the retry policy D §6 points at.
   attempt-start upsert and skip rule make redelivery harmless. No user or
   operator action is required; the 30-second processed bound applies after
   restart.
-- **Outbox replay (I §6, Sprint-0002 deliverable).** Precondition, verbatim in
-  spirit from I §6: **replay is valid only when PostgreSQL and its outbox
-  table survive** — if the outbox is gone there is nothing to replay from.
+- **Outbox replay (I §6, Sprint-0002 deliverable).** Precondition, preserved
+  from I §6: **replay is valid only when PostgreSQL and its outbox table
+  survive** — if the outbox is gone there is nothing to replay from.
   Procedure: re-publish outbox rows to `crm.events.v1` in outbox insertion
   order (internal `seq` order — used as the tool's processing order, never
-  exposed on the wire), optionally filtered by tenant and/or time range. Each
-  re-published message carries the **original stored envelope byte-for-byte —
-  original `event_id`, original `tenant_id`, original everything** — and the
-  same partition key (`tenant_id`), so receipts dedupe exactly (`processed`
-  receipts skip-and-ack per D §6) and replay is safe to run repeatedly and
-  after partial failures. Replay itself performs **no external side effects**;
-  it only writes to Kafka. Side-effect protection lives entirely in consumer
-  receipts.
+  exposed on the wire), optionally filtered by tenant and/or time range.
+  Outbox replay republishes the **same logical envelope values** — including
+  the same `event_id`, `tenant_id`, `event_type`, aggregate identity and
+  version (`aggregate_type`, `aggregate_id`, `aggregate_version`),
+  `schema_version`, `correlation_id`, `causation_id`, and `payload` — using
+  the **current canonical JSON serializer**, with the same partition key
+  (`tenant_id`). Because `event_id` is preserved, receipts dedupe exactly
+  (`processed` receipts skip-and-ack per D §6) and replay is safe to run
+  repeatedly and after partial failures. Replay itself performs **no external
+  side effects**; it only writes to Kafka. Side-effect protection lives
+  entirely in consumer receipts.
+- **Replay identity vs. offset reset (normative distinction).** Kafka offset
+  reset (I §8) re-reads the **original** Kafka records at their **existing**
+  offsets. Outbox replay creates **new** Kafka records at **new** offsets from
+  surviving PostgreSQL outbox state; it cannot reconstruct original Kafka
+  offsets, and it cannot reconstruct the original interleaving relative to
+  events published later. No byte-identical re-publication is promised —
+  identity is the logical envelope values above, anchored on `event_id`, never
+  an offset or byte sequence.
 - **Canonical duplicate-delivery mechanism (AC-4 / P §6.2).** The
   `kafka-consumer-groups.sh` offset reset (I §8) is canonical for the
   duplicate-event acceptance test because it redelivers identical
@@ -486,28 +608,36 @@ Obligation 2 and apply to **both** `outbox_event.last_error` and
 
 Concrete rules implementing the obligation:
 
-1. **Format:** `CODE: summary` — a code from the closed list below, a colon,
-   and a single-line operator-facing summary. Total length ≤ 500 characters,
-   truncated with `…` if longer. The summary is **constructed from the closed
-   code's template plus safe scalars only** (attempt number, topic/partition/
-   offset, HTTP-free broker error class, elapsed ms); it never interpolates
-   exception messages, stack traces, SQL text, request bodies, envelope
-   payloads, notes, tokens, or connection strings.
-2. **Closed code list (extend by contract change only):**
+1. **Format:** `CODE: summary` — a stable safe code from the closed list
+   below, a colon, and a single-line safe operator-facing summary. Total
+   length ≤ 500 characters, truncated with `…` if longer. The summary is
+   **constructed from the closed code's template plus safe scalars only**
+   (attempt number, broker error class, elapsed milliseconds); it never
+   interpolates exception messages, stack traces, SQL text, request bodies,
+   envelope payloads, notes, tokens, or connection strings.
+2. **Kafka coordinates are protected-log-only:** Kafka topic names, partition
+   numbers, and offsets may exist **only** in protected process logs. They are
+   never written into `outbox_event.last_error`, `consumer_receipt.last_error`,
+   or any tenant-facing response. A partition offset is a global monotone
+   counter: exposing it would let one tenant infer other tenants' event volume
+   and ordering — the same leak class as `outbox_event.seq` (D §7.1). Node A's
+   response-field allowlist is defense in depth; this rule is the source.
+3. **Closed code list (extend by contract change only):**
    `BROKER_UNAVAILABLE`, `PUBLISH_TIMEOUT`, `PUBLISH_REJECTED`,
    `EVENT_SCHEMA_INVALID`, `EVENT_LINKAGE_MISMATCH`, `EVENT_TYPE_UNKNOWN`,
    `EVENT_SCHEMA_VERSION_UNKNOWN`, `RECEIPT_WRITE_FAILED`, `CONSUMER_DB_ERROR`,
    `CONSUMER_UNEXPECTED`.
-3. **Full diagnostics** (stack traces, driver errors, raw broker responses) go
-   to the worker's protected process log, keyed by `event_id` and
-   `correlation_id` so operators can pivot from the safe summary to the
-   detail. The process log also never records token material (consistent with
-   P-AUTH-8's rule for the API log).
-4. **Tests:** the failure-path tests (Section 10) assert that `last_error`
+4. **Full diagnostics** (stack traces, driver errors, raw broker responses,
+   and Kafka topic/partition/offset coordinates) go to the worker's protected
+   process log, keyed by `event_id` and `correlation_id` so operators can
+   pivot from the safe summary to the detail. The process log also never
+   records token material (consistent with P-AUTH-8's rule for the API log).
+5. **Tests:** the failure-path tests (Section 10) assert that `last_error`
    matches `^[A-Z_]+: ` against the closed code list, is ≤ 500 chars, and
    contains none of: the interaction note text, any payload JSON, any seeded
-   dev token, any connection string fragment. This gate is mandatory before
-   any non-local deployment.
+   dev token, any connection string fragment, any Kafka topic name, or any
+   partition number or offset digits. This gate is mandatory before any
+   non-local deployment.
 
 ---
 
@@ -517,12 +647,12 @@ Concrete rules implementing the obligation:
 |---|---|---|
 | AC-4 / P §6.2 — duplicate delivery invisible | Receipts, skip only on `processed` (D §6, Section 7.3); canonical offset-reset redelivery (Section 8.3) | Process an event to `processed`; reset offsets per I §8; assert exactly one receipt for that `event_id`, receipt still `processed`, and P §4 invariant counts unchanged. |
 | AC-5 / P §6.3 — worker restart loses nothing | Lease expiry + re-claim (D §5); offset-commit-after-receipt rule (Section 7.3); at-least-once end to end (Section 8.3) | Stop worker → submit → assert state pending/published, not processed → restart → state `processed` within 30 s; invariant counts unchanged. |
-| Publication failure → retry → park | Section 8.1 ceiling 10, claim-loop backoff, terminal `failed`, `failure_stage = publication` | With broker stopped: submit; assert row stays `pending` with rising `attempt_count` and sanitized `last_error`; force ceiling (config = small N in test) → `status='failed'`; assert Section 9 hygiene; resurrect per 8.1 with broker up → `processed`. |
-| Consumer failure → retry → park → re-drive | Section 8.2 ceiling 10, seek-back retry, park-in-place, one-attempt-per-redelivery re-drive | Inject receipt-transaction failure; assert `attempt_count` advances, offset not committed below ceiling; at ceiling assert receipt `failed`, offset committed, state failed/`failure_stage=consumer`; clear the fault, redeliver per I §8 → `processed` (skip rule untouched). |
-| Invalid payload on read | Section 7.2 tier 1: no retry, `failed` receipt with schema code, park | Publish (test-harness path) a tier-1 invalid message; assert immediate `failed` receipt with `EVENT_SCHEMA_INVALID`, offset committed, no retry loop. |
-| Unattributable message | Section 7.2 tier 2: protected log line, offset committed, no receipt | Produce garbage bytes to the topic in a test; assert consumer survives, logs sanitized line, commits offset, and processes the next valid event. |
-| Envelope validity + pinned invariant | Sections 6.1–6.2 | Unit tests: valid envelope passes `event-envelope.v1`; each missing/extra field fails; `event_id ≠ outbox_event.id` is rejected before publish. |
-| Replay safety | Section 8.3 | Run replay twice over a processed range; assert receipt count per event stays 1 and no state changes. |
+| Publication failure → retry → park | Section 8.1 ceiling 10, claim-loop backoff, terminal `failed`, `failure_stage = publication` | With broker stopped: submit; assert row stays `pending` with rising `attempt_count` and sanitized `last_error`; force ceiling (config = small N in test) → `status='failed'`; assert Section 9 hygiene including **no Kafka topic name and no partition/offset digits** in `last_error`; resurrect per 8.1 with broker up → `processed`. |
+| Consumer failure → retry → park → re-drive | Section 8.2 ceiling 10, seek-back retry, 8.2.1 park write, one-attempt-per-redelivery re-drive | Inject receipt-transaction failure; assert `attempt_count` advances, offset not committed below ceiling; at ceiling assert the 8.2.1 upsert recorded receipt `failed` **before** the offset committed, state failed/`failure_stage=consumer`; clear the fault, redeliver per I §8 → `processed` (skip rule untouched). |
+| Invalid payload on read | Section 7.2 tier 1: no retry, 8.2.1 park write, park | Publish (test-harness path) a tier-1 invalid message for an event with **no existing receipt row**; assert the 8.2.1 upsert **creates** the `failed` receipt (`attempt_count = 1`, `processed_at` null, sanitized `last_error` = `EVENT_SCHEMA_INVALID: …`) and the offset commits only after it; no retry loop. Then mark an event `processed` and redeliver it under a now-failing validator; assert skip-and-ack: receipt remains `processed` and untouched. |
+| Unattributable message | Section 7.2 tier 2: protected log line, offset committed, no receipt | Produce garbage bytes to the topic in a test; assert consumer survives, logs sanitized line (Kafka coordinates in the protected log only), commits offset, and processes the next valid event. |
+| Envelope validity + pinned invariant + linkage | Sections 3.4, 6.1–6.2 | Unit tests with the Section 3.4 asserting validator: valid envelope passes `event-envelope.v1`; each missing/extra field fails; **negative format fixtures fail** — `event_id`/`tenant_id`/`actor_id` = `"banana"`, `occurred_at` = `"not-a-date"`, plus the payload analogues (bad uuids, bad `date-time`, bad `date`); `event_id ≠ outbox_event.id` and every Section 6.2 envelope↔outbox and envelope↔payload equality violation is rejected before publish with `EVENT_LINKAGE_MISMATCH`. |
+| Replay safety | Section 8.3 | Run replay twice over a processed range; assert receipt count per event stays 1 and no state changes; assert replayed records are new records (new offsets) carrying identical logical envelope values. |
 
 ## 11. Self-check against the freeze
 
@@ -536,7 +666,20 @@ Concrete rules implementing the obligation:
   semantics, and re-drive; D §6's skip rule and zero-row re-read rule are
   referenced unmodified and nothing conflicts with them; D §7.1 / P §6.4 four
   states and tie-break referenced unmodified.
-- `seq` confidentiality preserved (Section 5); never on the wire.
-- Obligation 2 included verbatim with implementing rules (Section 9).
+- `seq` confidentiality preserved (Section 5); never on the wire. Kafka
+  topic/partition/offset coordinates confined to protected process logs
+  (Section 9 rule 2) — never in `last_error` or tenant-facing responses.
+- Obligation 2 included verbatim with implementing rules (Section 9); format
+  validation is normative and asserting (Section 3.4).
+- Tier-1 invalid events park via an atomic create-or-update receipt upsert
+  (Section 8.2.1) that works with no pre-existing receipt row and preserves
+  skip-on-processed; offset commits only after the failed receipt is durable.
+- Replay promises logical-envelope-value identity (anchored on `event_id`)
+  via the current canonical serializer — never byte, offset, or interleaving
+  identity (Section 8.3); the PostgreSQL-survival precondition is preserved.
+- Publication lease default pinned at 10 s, under the 30-second AC-5 bound
+  (Section 8.1); cross-tenant head-of-line blocking named as an accepted
+  slice-scale risk with a pre-external-exposure fairness requirement
+  (Section 8.2.2).
 - No API endpoint shapes (Node A), no UX, no Wave-1 file modified, no
   infrastructure created.
