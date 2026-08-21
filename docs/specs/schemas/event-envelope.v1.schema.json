@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crmlab:schema:event-envelope:v1",
+  "title": "CRM event envelope v1",
+  "description": "The complete Kafka message value for topic crm.events.v1. Exactly twelve fields (frozen Sprint 0001 decision). event_id MUST equal outbox_event.id (database-contract.md section 5, ratified invariant). schema_version is the major version of the payload schema for this event_type; it selects the payload schema file (e.g. interaction.logged + 1 -> interaction-logged.v1.schema.json). Validators MUST evaluate this schema with draft 2020-12 format assertion enabled (e.g. Ajv strict + ajv-formats in assertion mode); format-as-annotation does not satisfy the contract (event-contract.md section 3.4). Contract: docs/specs/event-contract.md.",
+  "type": "object",
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Globally unique event identity. MUST equal outbox_event.id."
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Owning tenant. MUST equal outbox_event.tenant_id. Also the Kafka partition key."
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 100,
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$",
+      "description": "Domain event name, <aggregate>.<past-tense-verb>, e.g. interaction.logged. MUST equal outbox_event.event_type."
+    },
+    "aggregate_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Logical domain object the event is about, e.g. interaction. MUST equal outbox_event.aggregate_type."
+    },
+    "aggregate_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identifier of the aggregate row, e.g. interaction.id. MUST equal outbox_event.aggregate_id."
+    },
+    "aggregate_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of the aggregate at emission; 1 for append-only interactions in this slice. MUST equal outbox_event.aggregate_version."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC timestamp of the business fact (for interaction.logged: the server-assigned interaction.occurred_at). A business timestamp, not a delivery-order guarantee."
+    },
+    "actor_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "user_id of the acting user; provably a member of tenant_id via the database contract's composite actor FKs and withTenantWrite recheck."
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Major version of the payload schema for this event_type; scoped per event_type; 1 in this slice."
+    },
+    "correlation_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identifies the causal chain; minted by the API once per HTTP request and carried by every event that request stages."
+    },
+    "causation_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "event_id of the direct causal predecessor event, or null when the event originates directly from a user action. Always null in Sprint 0001."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-type-specific body, validated against the schema selected by (event_type, schema_version)."
+    }
+  },
+  "required": [
+    "event_id",
+    "tenant_id",
+    "event_type",
+    "aggregate_type",
+    "aggregate_id",
+    "aggregate_version",
+    "occurred_at",
+    "actor_id",
+    "schema_version",
+    "correlation_id",
+    "causation_id",
+    "payload"
+  ],
+  "additionalProperties": false
+}
