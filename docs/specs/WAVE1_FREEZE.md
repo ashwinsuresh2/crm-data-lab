@@ -19,6 +19,16 @@
 
 Wave-1 contracts may not be modified except under a new human-approved bounded loop. Wave-2 nodes treat them as frozen inputs; conflicts route to the lead, never edited in place by Wave-2 nodes.
 
+## Human-approved Wave-1 amendment (2026-08-20, ruled at the final freeze gate)
+
+- **Prior frozen commit:** `0838854`
+- **Amendment commit:** `8095d7b` (Node D, `docs/specs/database-contract.md` only), merged into `sprint-0001-contracts` at `af32c62`.
+- **Exact reasons (both ruled by the human after the final five-lens review):**
+  1. **Request-hash scope correction (§3):** the body-only `request_hash` definition was replaced with: "The request hash covers the canonical semantic request: all relevant tenant-scoped path identifiers, including contactId for log-interaction, plus the normalized request body. Server-generated fields such as occurred_at are excluded." Under body-only hashing, the same scoped key with the same body against a different contact would replay another contact's IDs instead of returning `409 idempotency_key_conflict`; Node A's API contract already stated the correct rule, and this aligns the frozen source.
+  2. **`attempt_count` in RETURNING lists (§5, §6):** the post-increment `attempt_count` was added to the illustrative RETURNING lists of the outbox claim operation and the consumer attempt-start operation, because Node E's retry ceilings are keyed on values those statements previously did not surface. The attempt policy itself is unchanged; ceilings remain Node E's.
+
+No other Wave-1 file changed; product behavior, domain objects, and local topology are untouched.
+
 ## Wave-2 obligations (recorded now, implemented later)
 
 ### Obligation 1 — withTenantWrite enforcement (mandatory Sprint-0002 implementation gate)
