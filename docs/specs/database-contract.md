@@ -171,7 +171,7 @@ everything else.
 | actor_user_id | uuid | Composite FK `(tenant_id, actor_user_id)` → membership `(tenant_id, user_id)`. |
 | operation | text | Logical operation name, e.g. `log-interaction`. |
 | key | text | Client-supplied idempotency key. |
-| request_hash | text | Hash of the canonical request body; detects "same key, different payload" misuse. |
+| request_hash | text | The request hash covers the canonical semantic request: all relevant tenant-scoped path identifiers, including contactId for log-interaction, plus the normalized request body. Server-generated fields such as occurred_at are excluded. |
 | status | text | `in_progress` \| `completed`. |
 | interaction_id | uuid | Result: the created interaction. Non-null on every committed `completed` row. |
 | task_id | uuid | Result: the created next-action task. Non-null on every committed `completed` row (the task is mandatory). |
@@ -190,8 +190,14 @@ Primary key: `(tenant_id, actor_user_id, operation, key)`.
    - `status = 'completed'` and `request_hash` matches → **replay**: return the stored
      `interaction_id` and `task_id` (the same response as the original), performing no
      writes.
-   - `request_hash` differs → key reuse with a different payload; surface as a client
-     error (exact HTTP status is Node A's contract). No writes.
+   - `request_hash` differs → same scoped key reused with a different contactId or a
+     different semantic body; reject as `409 idempotency_key_conflict`. No writes.
+     **Observable rule:** same scoped key + same contactId + same semantic body =
+     replay; same scoped key + different contactId or different semantic body =
+     `409 idempotency_key_conflict`. (Rationale: under body-only hashing, the same
+     key with the same body against a *different* contact would replay another
+     contact's IDs instead of conflicting; hashing the tenant-scoped path
+     identifiers closes that.)
    - `status = 'in_progress'` → a concurrent duplicate is in flight. Under
      `ON CONFLICT`, the second transaction **blocks** on the first's uncommitted
      insert until it commits or rolls back, then re-evaluates — so in practice the
@@ -447,7 +453,7 @@ ownership guard:
            ORDER BY seq
            FOR UPDATE SKIP LOCKED
            LIMIT $n)
-    RETURNING id, seq, payload, claim_id;
+    RETURNING id, seq, payload, claim_id, attempt_count;  -- post-increment; ceilings are Node E policy
    COMMIT;   -- lease is now durable; no locks held
    ```
 
@@ -542,7 +548,7 @@ success update below keeps observability consistent).
           attempt_count   = consumer_receipt.attempt_count + 1,
           last_attempt_at = now()
     WHERE consumer_receipt.status <> 'processed'
-   RETURNING status;
+   RETURNING status, attempt_count;   -- post-increment; retry policy is downstream's
    COMMIT;
    -- 0 rows returned → existing receipt is 'processed': duplicate delivery.
    --                   Skip all side effects and ack the message.
